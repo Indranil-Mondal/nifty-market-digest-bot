@@ -19,23 +19,19 @@ Per instrument: current level or price, NAV and iNAV where those exist, the day'
 move over 1/2/3/4 weeks and 3/6/12 months — each with the PE **as it stood on that past date**.
 Then a filtered news and policy section.
 
-```
-━━━━━━━━━━━━━━━━━
-NIFTY SMALLCAP 250 TRI
-18,312.20  ▲+0.19%  prev close · 17 Aug
-TRI 23,378.56
-PE 33.93 · PB 3.60 · DY 0.57%
-       chg %     PE
-1D     +0.19   33.9
-1W     -0.14   34.2
-2W     +0.87   34.6
-3W     +2.84   34.5
-4W     +1.75   36.0
-3M     +9.82   30.1
-6M    +14.14   26.5
-1Y    +10.58   31.8
-moves on TRI (total return), to 17 Aug close
-```
+<p align="center">
+  <img src="docs/sample-digest.png" alt="Sample morning digest showing Nifty Smallcap 250 TRI, the Nippon Gold ETF and the gold:silver ratio" width="640">
+</p>
+
+<p align="center">
+  <sub>Three of the eight blocks, rendered from real output. The rupee sign and flag emoji are
+  substituted in this image only — the Telegram message shows them correctly.</sub>
+</p>
+
+Every figure above came out of the live sources; nothing here is illustrative. Note what the
+labels are doing: `prev close · 17 Aug` because TRI and PE publish only after the close, and
+`moves on TRI (total return)` because that is the series the percentages were computed on. The
+gold block carries no PE column at all, since gold has no earnings.
 
 ---
 

@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.json.corrupt
+.env
+
+# data/history/*.json is deliberately NOT ignored. The daily NAV/TRI/PE cache is committed back
+# to the repo by the Actions job -- that is what makes the 12-month lookbacks cheap and what
+# lets a fresh clone start warm instead of re-downloading a year of archives.

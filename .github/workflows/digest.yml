@@ -1,0 +1,143 @@
+name: Morning digest
+
+# ---------------------------------------------------------------------------------------------
+# TIMING — and the reason there are four schedules rather than one
+#
+# GitHub Actions cron is always UTC and knows nothing about time zones. India is UTC+05:30 with
+# no daylight saving, so 11:11 IST is 05:41 UTC.
+#
+# The problem: Actions cron drift in 2026 is severe and GitHub has acknowledged it publicly,
+# attributing it to scheduled-workflow load growing faster than capacity. Maintainers report
+# nightly jobs arriving one to four hours late, and a */15 workflow firing roughly every 90
+# minutes. The delay happens BEFORE the run is created, so no amount of configuration avoids it.
+# A single 05:41 UTC trigger therefore cannot promise delivery "by 11:11 IST".
+#
+# The defence: fire several attempts across the morning and let the FIRST one that actually runs
+# send the digest. `--once-per-day` makes that safe — later attempts see the send ledger, log
+# "already delivered" and exit without messaging you again. Attempts are all after the 09:15 IST
+# market open (03:45 UTC) so every one of them has live intraday levels:
+#
+#     04:11 UTC = 09:41 IST   early attempt
+#     04:51 UTC = 10:21 IST
+#     05:31 UTC = 11:01 IST   the intended slot, closest to 11:11 without overrunning it
+#     06:31 UTC = 12:01 IST   catch-up, so a badly delayed morning still delivers
+#
+# Minutes ending in :00 are the most congested, so none are used. If you want delivery as close
+# to 11:11 as possible and are willing to accept occasional lateness, delete the first two lines.
+# For minute-accurate delivery, drive `workflow_dispatch` from an external free scheduler
+# instead — see README "Timing".
+#
+# Weekdays only. Indian equity markets are shut at weekends, so a weekend run would re-send
+# Friday's numbers as if they were new. For all seven days, change `1-5` to `*`.
+#
+# Exchange holidays are deliberately not encoded: a hardcoded holiday list rots. On a holiday the
+# digest still sends and reports the previous close, labelled with its real date.
+# ---------------------------------------------------------------------------------------------
+
+on:
+  schedule:
+    - cron: "11 4 * * 1-5"
+    - cron: "51 4 * * 1-5"
+    - cron: "31 5 * * 1-5"
+    - cron: "31 6 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Render but do not send"
+        type: boolean
+        default: false
+      diagnose:
+        description: "Check every source's reachability from the runner, then stop"
+        type: boolean
+        default: false
+
+# Committing the history cache needs write access to the repo. Nothing else does.
+permissions:
+  contents: write
+
+# With four scheduled attempts a delayed run can still be going when the next fires. Serialise
+# them so they cannot send two digests or race on the history commit; the second then reads the
+# ledger the first wrote and exits cleanly.
+concurrency:
+  group: morning-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Several of these hosts behave differently from an Azure datacenter IP than from a home
+      # connection, and that cannot be tested locally. This step answers it directly. It runs
+      # only on a manual dispatch with the box ticked.
+      - name: Diagnose sources
+        if: inputs.diagnose
+        run: python -m scripts.diagnose
+
+      # --once-per-day only on the schedule. A manual dispatch is an explicit request, so it
+      # sends even if the morning's digest already went out.
+      - name: Send digest
+        if: ${{ !inputs.diagnose }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GUARD: ${{ github.event_name == 'schedule' && '--once-per-day' || '--force' }}
+        run: |
+          python -m bot.main $GUARD ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      - name: Commit updated history
+        # Skipped on a diagnose run, which fetches nothing worth keeping.
+        #
+        # Runs even when the digest was degraded: whatever data we did collect is worth keeping,
+        # and every stored point is one fewer archive request tomorrow.
+        #
+        # This commit also doubles as repository activity. GitHub disables scheduled workflows
+        # after 60 days of inactivity on a repo, and a daily commit keeps the clock reset --
+        # see README "Staying alive" for the caveat about bot-authored commits.
+        if: always() && !inputs.diagnose
+        run: |
+          if [ -z "$(git status --porcelain data/)" ]; then
+            echo "history unchanged, nothing to commit"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git commit -m "history: $(date -u +%Y-%m-%d) [skip ci]"
+          # Rebase rather than force: a manual dispatch and the cron run can both push.
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Report failure to Telegram
+        # Deliberately raw curl, not Python. If the failure was an import error, a bad
+        # dependency or a syntax mistake, anything that goes through bot/ would fail too -- and
+        # silence is the one outcome we cannot allow, because it is indistinguishable from a
+        # quiet market.
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          curl -sS --max-time 30 \
+            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" \
+            --data-urlencode "text=⚠️ <b>Morning digest job failed</b>
+          The workflow itself errored, so no digest was produced.
+          <a href=\"${RUN_URL}\">View the run log</a>" \
+            > /dev/null

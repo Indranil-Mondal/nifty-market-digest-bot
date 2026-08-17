@@ -1,0 +1,16 @@
+# Deliberately minimal. Every dependency is a thing that can break a bot nobody is watching,
+# so RSS parsing, CSV, JSON and timezones all use the standard library instead.
+requests==2.32.3
+
+# zoneinfo reads the *system* IANA tz database. Linux CI runners have one, but Windows never
+# does and slim containers often do not. Pinning tzdata makes "Asia/Kolkata" resolve identically
+# everywhere instead of depending on the host image. bot.util degrades to a fixed +05:30 offset
+# if this is somehow absent, so a missing tzdb can never stop the digest being sent.
+tzdata==2025.2
+
+# Pinned explicitly, and NOT incidentally via requests, because a stale bundle silently breaks
+# real sources. sebi.gov.in, amfiindia.com and ibjarates.com all serve a complete, valid chain
+# under "Sectigo Public Server Authentication CA DV R36"; certifi 2022.12.07 has no Sectigo root
+# and rejects all three, while 2026.07.22 verifies them. The correct fix is a current bundle --
+# never verify=False, which would disable authentication for a problem that does not exist.
+certifi>=2026.7.22

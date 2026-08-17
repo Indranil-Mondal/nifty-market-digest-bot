@@ -1,0 +1,14 @@
+# Normalise everything to LF in the repository.
+#
+# This matters concretely, not just cosmetically: the workflow's `run:` blocks are bash scripts
+# executed on a Linux runner, and a stray CR at the end of a line makes bash treat it as part of
+# the command, producing errors like `$'\r': command not found`. Committing from Windows without
+# this would introduce exactly that.
+* text=auto eol=lf
+
+# Data files are generated and committed by CI; keeping them LF avoids a whole-file diff every
+# time the runner rewrites one.
+*.json text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+*.md   text eol=lf

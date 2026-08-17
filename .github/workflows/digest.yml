@@ -70,6 +70,20 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v4
+        with:
+          # Check out AND push over SSH with the repository's deploy key, instead of the default
+          # GITHUB_TOKEN.
+          #
+          # Why: GitHub disables scheduled workflows on a public repository after 60 days with no
+          # repository activity, and a push made with GITHUB_TOKEN does not trigger workflows --
+          # which means it may not count as the activity that resets that clock. Since this bot
+          # commits its history cache every morning, that daily commit is the natural keepalive,
+          # but only if it is a real push. A deploy-key push unambiguously is.
+          #
+          # Loop safety: this workflow has no `push` trigger, so a deploy-key push cannot
+          # re-trigger it. The commit message still carries [skip ci] as a second line of defence
+          # in case a push trigger is ever added.
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -109,6 +123,9 @@ jobs:
         # see README "Staying alive" for the caveat about bot-authored commits.
         if: always() && !inputs.diagnose
         run: |
+          # Prove which transport is in use. If this ever reads https:// then the deploy key was
+          # not picked up and the 60-day keepalive is silently not working.
+          echo "push remote: $(git remote get-url --push origin)"
           if [ -z "$(git status --porcelain data/)" ]; then
             echo "history unchanged, nothing to commit"
             exit 0

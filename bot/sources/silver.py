@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 
 ISIN = "INF0R8F01091"
 BSE_SCRIP = "544384"
-NAME_FRAGMENT = "SILVER ETF"
+NAME_FRAGMENT = "ZERODHA SILVER"
 NSE_SYMBOL = "SILVERCASE"
 
 # mf=77 is Zerodha Mutual Fund, established empirically: that response carries schemes 153413

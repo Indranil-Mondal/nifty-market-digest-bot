@@ -61,16 +61,16 @@ ZERODHA_SILVER = amfi.AmfiScheme(
     label="Zerodha Silver ETF",
 )
 
-# The fund launched in 2025, so a full 12-month lookback resolves but a 430-day cold start
-# reaches past inception -- which is fine, AMFI simply returns nothing before the first NAV.
-# min_healthy_points is set below a year of Indian trading days for the same reason: until the
-# fund has that much history, "not enough points" is the truth, not a fault.
+# Inception was 26 Mar 2025 (first AMFI NAV 10.1689), so the cold start is set to reach past
+# it rather than to the usual 430 days, which would stop in July 2025 and quietly leave the
+# fund's first four months out of the cache. AMFI simply returns nothing before the first NAV,
+# so asking for more than exists costs one extra window and no correctness.
 ETF = bse_etf.ListedEtf(
     amfi_scheme=ZERODHA_SILVER,
     bse_scrip=BSE_SCRIP,
     nse_symbol=NSE_SYMBOL,
     name_fragment=NAME_FRAGMENT,
-    cold_start_days=430,
+    cold_start_days=560,
     warm_overlap_days=15,
     min_healthy_points=180,
 )

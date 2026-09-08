@@ -81,6 +81,12 @@ class Snapshot:
     # Which series the percentage moves were computed on, so the digest can say so.
     change_basis: str = "level"
     changes: dict[str, Change] = field(default_factory=dict)
+    # The traded price's OWN day move, set only when the lookback table is computed on some
+    # other series (a fund NAV) whose newest point is from a different session. Without it the
+    # headline would print a price beside a percentage belonging to a different number on a
+    # different date -- which for the Zerodha Silver ETF on 8 Sep 2026 meant showing a 1.41%
+    # fall on a day the price rose 0.47%.
+    level_day: Optional[Change] = None
     pe_then: dict[str, Reading] = field(default_factory=dict)
     # Human-facing caveats ("TRI publishes after close") and machine failures, kept apart so
     # expected limitations are not presented to the user as errors.

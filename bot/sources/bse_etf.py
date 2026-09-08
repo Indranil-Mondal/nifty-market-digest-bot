@@ -120,7 +120,12 @@ def ibja_rate(http: Http, metal: IbjaMetal) -> Optional[float]:
 
 
 def find_isin_row(csv_text: str, isin: str) -> Optional[dict[str, str]]:
-    """Locate our row by ISIN. Matching on the ticker would be looser and less safe."""
+    """Locate our row by ISIN. Matching on the ticker would be looser and less safe.
+
+    Matching on the NAME would be worse than loose, it would be wrong: the bhavcopy's
+    FinInstrmNm for both Zerodha ETFs is the literal string "Zerodha Mutual Fund", so GOLDCASE
+    and SILVERCASE are indistinguishable by name in that file. Only the ISIN separates them.
+    """
     reader = csv.DictReader(io.StringIO(csv_text))
     for raw in reader:
         row = {(k or "").strip(): (v or "").strip() for k, v in raw.items()}
@@ -290,8 +295,15 @@ def fetch_prices(http: Http, series: Series, etf: ListedEtf, today: dt.date) -> 
     # --- price ---------------------------------------------------------------------------
     close_date, close_fields = bhavcopy_close(http, etf.isin, today - dt.timedelta(days=1))
     if close_date is not None and "level" in close_fields:
-        series.upsert(close_date, {"level": close_fields["level"]})
-        result.history.setdefault(close_date, {})["level"] = close_fields["level"]
+        # Keep the exchange's own previous close alongside the close. It costs nothing -- the
+        # bhavcopy row already carries it -- and it is what lets the digest state the price's
+        # OWN day move on day one, before this instrument has built up any price history of its
+        # own. Without it a newly added ETF shows its NAV's move next to its price.
+        stored = {"level": close_fields["level"]}
+        if "prev_close" in close_fields:
+            stored["prev_close"] = close_fields["prev_close"]
+        series.upsert(close_date, stored)
+        result.history.setdefault(close_date, {}).update(stored)
     else:
         result.errors.append("BSE bhavcopy close unavailable")
 
@@ -313,6 +325,9 @@ def fetch_prices(http: Http, series: Series, etf: ListedEtf, today: dt.date) -> 
         price_for_premium = live.price
         if not is_live and live.price_date is not None:
             result.history.setdefault(live.price_date, {}).setdefault("level", live.price)
+            if live.prev_close is not None:
+                result.history[live.price_date].setdefault("prev_close", live.prev_close)
+                series.upsert(live.price_date, {"prev_close": live.prev_close})
     else:
         # BSE's quote endpoint is Referer-gated. NSE's ETF list is an independent second opinion
         # on price (though never on NAV or iNAV).

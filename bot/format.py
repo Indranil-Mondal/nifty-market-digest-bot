@@ -122,6 +122,10 @@ def _headline(snapshot: Snapshot, generated_at: dt.datetime) -> list[str]:
         lead, lead_name = snapshot.nav, "NAV"
 
     day = snapshot.changes.get("1D")
+    # When the table runs on a fund NAV, that NAV's move belongs to the NAV, not to the price
+    # printed beside it -- and the two can be from different sessions. Show the lead's own move.
+    if lead is snapshot.level and snapshot.level_day is not None and snapshot.level_day.known:
+        day = snapshot.level_day
     arrow = _arrow(day.pct if day else None)
     tag = _freshness_tag(lead, generated_at)
     line = f"<code>{esc(_reading(lead))}</code>"
@@ -171,11 +175,12 @@ def render_snapshot(snapshot: Snapshot, generated_at: dt.datetime) -> str:
 
     if snapshot.change_basis != "level":
         parts.append(f"<i>moves on {esc(snapshot.change_basis)}</i>")
-    # Three notes, not two: the instruments with real caveats (a licensee-only index, a
+    # Four notes, not two: the instruments with real caveats (a licensee-only index, a
     # non-existent benchmark, a ratio needing its range for context) each carry a permanent
-    # spec note plus one or two computed ones, and truncating to two silently dropped the
-    # computed half -- which is the part that changes daily.
-    for note in snapshot.notes[:3]:
+    # spec note plus one or two computed ones, and truncating silently dropped the computed
+    # half -- which is the part that changes daily. A metal ETF whose NAV lags the exchange
+    # needs one more line still, to say which session each percentage belongs to.
+    for note in snapshot.notes[:4]:
         parts.append(f"<i>{esc(note)}</i>")
     if snapshot.errors:
         parts.append(f"<i>partial: {esc(snapshot.errors[0])}</i>")

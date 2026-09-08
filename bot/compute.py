@@ -198,13 +198,49 @@ def build_snapshot(
     else:
         snapshot.change_basis = f"level, to {anchor_date:%d %b} close"
 
-    # A live headline needs its own same-day comparison, since the table may be anchored on a
-    # previous close when the basis is an EOD series.
-    if snapshot.level.known and snapshot.level.freshness == FRESHNESS_LIVE and basis != "level":
-        prev, prev_date = series.as_of(today - dt.timedelta(days=1), "level")
+    # The headline price needs its OWN day comparison whenever the table is computed on some
+    # other series. Two cases, and both used to mislead:
+    #
+    #   * a live intraday price against a table anchored on the previous close;
+    #   * a fund NAV that lags the exchange. Zerodha publishes its commodity-ETF NAVs to AMFI a
+    #     day later than everything else it runs, so on 8 Sep 2026 the silver block paired an
+    #     8 Sep price with a NAV move measured 4 Sep -> 7 Sep, and printed "Price 23.46 -1.41%"
+    #     on a day the price had risen 0.47%.
+    #
+    # So the arrow beside the price is now the price's move, and the table keeps saying which
+    # series and which date it was computed on.
+    if snapshot.level.known and basis != "level" and snapshot.level.as_of is not None:
+        # Prefer the exchange's own previous close for this very row, which a listed ETF
+        # supplies from day one. Fall back to the newest stored level before it, which is all
+        # an index-style series has.
+        prior = snapshot.level.as_of - dt.timedelta(days=1)
+        prev, prev_date = series.as_of(snapshot.level.as_of, "prev_close")
+        if prev is None or prev_date != snapshot.level.as_of:
+            prev, prev_date = series.as_of(prior, "level")
+            base_label = f"{prev_date:%d %b} close" if prev_date else "previous close"
+        else:
+            prev_date, base_label = None, "previous close"
+
         day_pct = pct_change(snapshot.level.value, prev)
         if day_pct is not None:
-            snapshot.note(f"live level {day_pct:+.2f}% vs {prev_date:%d %b} close")
+            snapshot.level_day = Change(
+                label="1D", pct=day_pct, base_value=prev, base_date=prev_date, target_date=prior,
+            )
+            if snapshot.level.freshness == FRESHNESS_LIVE:
+                snapshot.note(f"live level {day_pct:+.2f}% vs {base_label}")
+            elif snapshot.level.as_of != anchor_date:
+                # Only when the two genuinely differ. On a normal day the price and the basis
+                # share a date and this line would be noise.
+                #
+                # First in the list, ahead of the permanent caveats: a reader looking at two
+                # percentages from two different sessions needs this before anything else, and
+                # the renderer only shows the first few notes.
+                divergence = (
+                    f"price {day_pct:+.2f}% on {snapshot.level.as_of:%d %b}; "
+                    f"table is {basis} to {anchor_date:%d %b}"
+                )
+                if divergence not in snapshot.notes:
+                    snapshot.notes.insert(0, divergence)
 
     if snapshot.level.known and snapshot.level.freshness is None:
         snapshot.level.freshness = FRESHNESS_PREV_CLOSE

@@ -159,12 +159,12 @@ this repository's own record, comparing each run's `created_at` against its nomi
 
 | Date | Delay |
 |---|---|
-| 18–26 Aug 2026 | +25 to +45 min |
+| 18–26 Aug 2026 | +24m to +1h 06m |
 | 27 Aug | **+11h 01m** |
 | 28 Aug | **+12h 12m** |
 | 31 Aug | +6h 36m |
 | 1 Sep | +5h 11m |
-| 2–8 Sep | +4h 17m to +5h 03m, *every day* |
+| 2–8 Sep | +4h 15m to +6h 24m, *every day* |
 
 Two things follow. The delay is in run **creation**, so nothing in the workflow file prevents it.
 And it applies to every cron entry on a given day at once — the four entries on 8 Sep were late
@@ -173,13 +173,13 @@ first one win", does not work: they all drift together. That design delivered at
 
 **The fix: stop trying to be *triggered* at the right time, and be *awake* at it instead.**
 
-Ten attempts span from mid-afternoon UTC the previous day to just before the target. Each one
-starts with a gate step — placed before checkout, so a wasted attempt costs a runner start and
-nothing else — which works out the next weekday 05:41 UTC slot and decides:
+An attempt fires **every hour**, around the clock. Each one starts with a gate step — placed
+before checkout, so a wasted attempt costs a runner start and nothing else — which works out the
+next weekday 05:41 UTC slot and decides:
 
 | Situation | Action |
 |---|---|
-| slot is within 210 minutes | **wait for it, then send** — this is the normal path |
+| slot is within 180 minutes | **wait for it, then send** — this is the normal path |
 | slot is further off than that | exit; a later attempt will be closer |
 | slot already passed, by up to 8h | send now, late, rather than skip the day |
 | slot passed by more than 8h | exit; tomorrow's will be along sooner |
@@ -187,20 +187,35 @@ nothing else — which works out the next weekday 05:41 UTC slot and decides:
 Whichever attempt first lands in the window sleeps until exactly 05:41 UTC and sends. The others
 finish in seconds, and `--once-per-day` plus the send ledger mean a duplicate is impossible.
 
-Replayed against all sixteen real drift figures above, plus synthetic delays of 0, 2, 8, 15 and
-16.7 hours: **21 of 22 deliver at exactly 11:11 IST**. The one miss is a 16.7-hour delay, worse
-than anything yet observed, which degrades to 12:51 IST rather than vanishing.
+**Why hourly, and why 180 minutes.** Coverage is guaranteed exactly when
 
-Three consequences worth stating plainly:
+```
+MAX_WAIT >= (gap between attempts) + (spread between attempts on the same day)
+```
 
-- One runner a day idles for up to ~3.5 hours. Actions minutes are not metered on a public
+The gap is 60 minutes. The spread — how much the delay varies *between* cron slots on one day,
+which turns out to be partly systematic per slot rather than random noise — was measured at up to
+**91.4 minutes** on this repo. 60 + 91.4 = 151.4, so a 180-minute window clears it with half an
+hour spare. A uniform grid also cannot have a hole in it, which matters: an earlier draft bunched
+ten attempts around the target and left 05:31–14:41 UTC empty, silently breaking on-time delivery
+for any delay between 15h and 20.7h — against an observed maximum of 12.4h.
+
+Simulated over **every whole minute of delay from 0 to 24 hours**, across a full Monday-to-Friday
+week, with and without that 91.4-minute spread: **7,205 of 7,205 deliveries land at exactly
+11:11 IST**. (The simulation drives the real gate script, cross-checked against a Python model at
+104 sample points across a week with zero disagreements.)
+
+Two consequences worth stating plainly:
+
+- One runner a day idles for up to 3 hours. Actions minutes are not metered on a public
   repository, so this costs nothing, but it is real machine time.
-- The Actions tab shows ~10 runs a day. All but one finish in seconds; the step summary on each
+- The Actions tab shows 24 runs a day. All but one finish in seconds; the step summary on each
   says which branch of the table it took and why.
-- Weekday selection is deliberately *not* in the cron lines any more. Attempts begin the previous
-  UTC afternoon, so a Friday-evening attempt is aiming at Monday, and the gate resolves that
-  itself. (11:11 IST and 05:41 UTC always fall on the same calendar day, so an IST weekday and a
-  UTC weekday are the same thing here.)
+
+Weekday selection is deliberately *not* in the cron line. Attempts run around the clock, so one
+on Friday evening is aiming at Monday, and the gate resolves that itself. (11:11 IST and 05:41
+UTC always fall on the same calendar day, so an IST weekday and a UTC weekday are the same thing
+here.)
 
 **If you would rather have exact timing with no idling**, drive `workflow_dispatch` from an
 external scheduler — dispatch runs start within seconds, only `schedule` is queued. Cloudflare

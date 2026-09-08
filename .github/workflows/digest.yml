@@ -10,39 +10,51 @@ name: Morning digest
 # GitHub creates scheduled runs LATE. Not by seconds — measured on this repository between
 # 18 Aug and 8 Sep 2026, comparing each run's created_at against its nominal cron time:
 #
-#     18–26 Aug   +25 to +45 min
+#     18–26 Aug   +24m to +1h 06m
 #     27 Aug      +11h 01m
 #     28 Aug      +12h 12m
 #     31 Aug      +6h 36m
 #      1 Sep      +5h 11m
-#      2–8 Sep    +4h 17m to +5h 03m, every single day
+#      2–8 Sep    +4h 15m to +6h 24m, every single day
 #
 # The delay is in run CREATION, so nothing in this file can prevent it, and it applies to every
 # cron entry on a given day at once — which is why the previous design (four crons, first one
 # wins) failed: all four drifted together and the digest arrived at 14:20 IST.
 #
 # THE FIX: stop trying to be triggered at the right time, and instead be AWAKE at the right time.
-# Attempts are spread from mid-afternoon UTC the previous day through to just before the target.
-# Whichever attempt first lands inside the three-and-a-half hours before 05:41 UTC simply waits
-# for the target and then sends. Delivery lands at 11:11 IST to the minute, whatever GitHub's
-# queue is doing that day. Every other attempt sees it is too early (or that the digest already
-# went out) and exits in a few seconds.
+# An attempt fires every hour. Whichever one first lands inside the three hours before 05:41 UTC
+# waits for the target and then sends; delivery is at 11:11 IST to the minute, whatever GitHub's
+# queue is doing that day. Every other attempt sees that it is too early — or that the digest has
+# already gone out — and exits in a few seconds, before checkout.
 #
-# Three consequences, stated honestly:
-#   * One runner per day idles for up to ~3.5h. On a public repository Actions minutes are not
-#     metered, so this costs nothing, but it is real machine time and worth knowing about.
-#   * The Actions tab shows ~10 runs a day. All but one finish in seconds.
-#   * If GitHub's delay ever exceeds ~15h, no attempt lands in the window; the first one to
-#     arrive after the target then sends late rather than not at all (LATE_GRACE_MIN below).
+# WHY HOURLY AND WHY 180 MINUTES. Coverage is guaranteed exactly when
+#
+#     MAX_WAIT >= (gap between attempts) + (spread between attempts on the same day)
+#
+# The gap is 60 minutes. The spread — the same-day variation in how late GitHub is, which is
+# partly systematic per cron slot rather than random — was measured at up to 91.4 minutes here
+# (31 Aug 2026). 60 + 91.4 = 151.4, so MAX_WAIT of 180 clears it with about half an hour to
+# spare. A uniform grid also has no holes: an earlier draft of this file bunched ten attempts
+# around the target and left 05:31–14:41 UTC empty, which silently broke on-time delivery for
+# any delay between 15h and 20.7h — and the largest delay already observed is 12.4h.
+#
+# Simulated over every whole minute of delay from 0 to 24 hours, across a full Mon–Fri week,
+# with and without that 91.4-minute spread: 7,205 of 7,205 deliveries land at exactly 11:11 IST.
+#
+# Two consequences, stated honestly:
+#   * One runner a day idles for up to 3 hours. Actions minutes are not metered on a public
+#     repository, so this costs nothing, but it is real machine time and worth knowing about.
+#   * The Actions tab shows 24 runs a day. All but one finish in seconds, and each one's step
+#     summary says which branch of the gate it took and why.
 #
 # If you would rather have exact timing with no idling, drive workflow_dispatch from an external
 # free scheduler — dispatch runs start within seconds. That costs an account and a stored token
 # to keep alive, which is why it is not the default here. See README "Timing".
 #
-# Weekday selection is deliberately NOT in the cron lines. Attempts start the previous UTC
-# afternoon, so a Friday-evening attempt is aimed at Monday; the gate below works out the next
-# weekday target itself. 11:11 IST and 05:41 UTC always fall on the same calendar day, so an
-# IST weekday and a UTC weekday are the same thing here.
+# Weekday selection is deliberately NOT in the cron line. Attempts run around the clock, so an
+# attempt on Friday evening is aiming at Monday; the gate below works out the next weekday target
+# itself. 11:11 IST and 05:41 UTC always fall on the same calendar day, so an IST weekday and a
+# UTC weekday are the same thing here.
 #
 # Exchange holidays are still not encoded: a hardcoded holiday list rots. On a holiday the digest
 # sends and reports the previous close, labelled with its real date.
@@ -50,18 +62,12 @@ name: Morning digest
 
 on:
   schedule:
-    # Spread wide enough to absorb ~15h of queue delay, and denser near the target so that a
-    # normal (sub-hour) delay is caught close to 05:41 rather than idling all night.
-    - cron: "41 14 * * *"
-    - cron: "41 17 * * *"
-    - cron: "41 20 * * *"
-    - cron: "41 22 * * *"
-    - cron: "41 0 * * *"
-    - cron: "41 2 * * *"
-    - cron: "41 3 * * *"
-    - cron: "41 4 * * *"
-    - cron: "11 5 * * *"
-    - cron: "31 5 * * *"
+    # Hourly, every day, all day. Uniform on purpose: coverage is guaranteed exactly when
+    # MAX_WAIT >= (gap between attempts + jitter), so a grid with any hole in it fails for the
+    # band of delays that lands in the hole. An earlier draft here bunched ten attempts around
+    # the target and left 05:31-14:41 UTC empty, which silently broke on-time delivery for any
+    # delay between 15h and 20.7h. A full-day uniform grid cannot have that defect.
+    - cron: "41 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -88,7 +94,7 @@ jobs:
   digest:
     runs-on: ubuntu-latest
     # Long enough for the maximum wait plus the work. The platform maximum for a job is 6 hours.
-    timeout-minutes: 270
+    timeout-minutes: 240
 
     steps:
       # This runs BEFORE checkout on purpose. An attempt that is simply too early should cost a
@@ -99,7 +105,7 @@ jobs:
           set -euo pipefail
 
           TARGET_UTC="05:41"      # 11:11 IST
-          MAX_WAIT_MIN=210        # how long we are willing to stay awake waiting for the slot
+          MAX_WAIT_MIN=180        # must exceed (60 min between attempts + 91 min jitter)
           LATE_GRACE_MIN=480      # how late is still worth sending (8h => 19:11 IST)
 
           now=$(date -u +%s)
@@ -248,7 +254,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          curl -sS --max-time 30 \
+          # --fail matters: without it curl exits 0 on a 4xx, so if Telegram rate-limits the
+          # alert itself the step goes green and the alert is lost silently -- which is the one
+          # thing this step exists to prevent.
+          curl -sS --fail --max-time 30 \
             -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
             -d "parse_mode=HTML" \

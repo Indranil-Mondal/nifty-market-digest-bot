@@ -414,7 +414,7 @@ python -m venv .venv
 .venv/Scripts/python -m scripts.smoke               # fetch everything, print the digest
 .venv/Scripts/python -m scripts.diagnose            # reachability table for every source
 .venv/Scripts/python -m scripts.news_check          # probe feeds, show what scoring picks
-.venv/Scripts/python -m unittest discover -s tests  # 112 tests, no network
+.venv/Scripts/python -m unittest discover -s tests  # 115 tests, no network
 .venv/Scripts/python scripts/render_sample.py       # regenerate the README screenshot
 ```
 

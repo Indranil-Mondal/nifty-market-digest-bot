@@ -187,12 +187,16 @@ def render_snapshot(snapshot: Snapshot, generated_at: dt.datetime) -> str:
 
     if snapshot.change_basis != "level":
         parts.append(f"<i>moves on {esc(snapshot.change_basis)}</i>")
-    # Four notes, not two: the instruments with real caveats (a licensee-only index, a
-    # non-existent benchmark, a ratio needing its range for context) each carry a permanent
-    # spec note plus one or two computed ones, and truncating silently dropped the computed
-    # half -- which is the part that changes daily. A metal ETF whose NAV lags the exchange
-    # needs one more line still, to say which session each percentage belongs to.
-    for note in snapshot.notes[:4]:
+    # Five notes. The cap exists so a block cannot grow without bound, but every increase so far
+    # has been forced by a real block hitting it, and a block at the cap drops a line silently --
+    # which is the failure mode this project keeps paying for.
+    #
+    # The worst realistic case is a metal ETF and it needs exactly five: a source-has-stopped
+    # warning, the price/NAV session divergence, its permanent physical-backing caveat, the
+    # premium to iNAV, and the IBJA cross-check. Silver produces four of those on an ordinary
+    # morning, so at [:4] the fifth arrived only on the day something broke -- and paid for
+    # itself by pushing another line off. TestNoteBudget pins that arithmetic.
+    for note in snapshot.notes[:5]:
         parts.append(f"<i>{esc(note)}</i>")
     if snapshot.errors:
         parts.append(f"<i>partial: {esc(snapshot.errors[0])}</i>")

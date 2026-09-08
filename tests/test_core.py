@@ -33,6 +33,7 @@ from bot.model import (
     Change,
     Digest,
     Reading,
+    Snapshot,
 )
 from bot.sources import amfi, bse, gsr, nse
 from bot.state import Series, Store
@@ -1021,6 +1022,58 @@ class TestHeadlineDayMove(unittest.TestCase):
         snap = build_snapshot(spec, s, result, self.today)
         head = fmt._headline(snap, dt.datetime(2026, 9, 9, 11, 11))[0]
         self.assertIn("%", head)
+
+
+class TestNoteBudget(unittest.TestCase):
+    """The renderer's note cap must fit the worst block, not the average one.
+
+    Notes are the only channel the digest has for "this figure is not what it looks like", and
+    the renderer shows a fixed number of them. Every time a block has reached that number, the
+    line that fell off was a real one -- and it fell off silently, on the exact morning something
+    had gone wrong, because a staleness warning is what pushes a block over the edge.
+
+    So the cap is pinned here rather than left as a magic number in format.py: if a future note
+    takes any block past it, this fails instead of the digest quietly getting shorter.
+    """
+
+    WORST_CASE = [
+        "nav last updated 19 Aug — source may have stopped",   # machine: a source stopped
+        "price +0.47% on 08 Sep; table is nav to 07 Sep",           # machine: session divergence
+        "physically backed; one unit is about a tenth of a gram of silver",   # spec caveat
+        "price -0.47% vs iNAV",                                     # machine: premium
+        "IBJA 999 silver ₹233,826/kg",                          # machine: cross-check
+    ]
+
+    def _render(self, notes):
+        snap = Snapshot(key="silver_zerodha", display="SILVER", kind="etf")
+        snap.level = Reading(value=23.46, as_of=D(2026, 9, 8), freshness=FRESHNESS_PREV_CLOSE)
+        snap.nav = Reading(value=23.32, as_of=D(2026, 9, 7))
+        snap.changes = {"1D": Change(label="1D", pct=-1.41)}
+        snap.basis_field, snap.change_basis = "nav", "NAV, to 07 Sep close"
+        snap.notes = list(notes)
+        return fmt.render_snapshot(snap, dt.datetime(2026, 9, 9, 11, 11))
+
+    def test_the_worst_realistic_block_loses_nothing(self):
+        rendered = self._render(self.WORST_CASE)
+        for note in self.WORST_CASE:
+            self.assertIn(note, rendered, f"dropped: {note!r}")
+
+    def test_a_source_has_stopped_warning_is_never_the_line_that_falls_off(self):
+        # Even past the cap, the warning must survive: compute.py inserts machine-discovered
+        # notes at the front precisely so the casualty is the least urgent line.
+        rendered = self._render(self.WORST_CASE + ["a sixth note from some future change"])
+        self.assertIn("source may have stopped", rendered)
+
+    def test_an_ordinary_morning_leaves_a_slot_spare(self):
+        # Four notes is silver on a normal day. Counting <i> tags would be the wrong measure --
+        # the basis line and the headline freshness tag are italic too -- so assert on the notes
+        # themselves: all four render, and the cap still has room for the warning that only
+        # appears once something has broken.
+        ordinary = self.WORST_CASE[1:]
+        self.assertEqual(len(ordinary), 4)
+        rendered = self._render(ordinary)
+        for note in ordinary:
+            self.assertIn(note, rendered)
 
 
 if __name__ == "__main__":

@@ -239,14 +239,14 @@ class TestPersistAndSnapshot(unittest.TestCase):
         s = Series.load("demo", self.root)
         result = FetchResult()
         result.add("level", 123.0, as_of=self.today, freshness=FRESHNESS_LIVE)
-        persist(result, s, self.today)
+        persist(result, s)
         self.assertEqual(len(s), 0)
 
     def test_final_values_are_persisted(self):
         s = Series.load("demo", self.root)
         result = FetchResult()
         result.add("tri", 456.0, as_of=D(2026, 8, 17), freshness=FRESHNESS_PREV_CLOSE)
-        persist(result, s, self.today)
+        persist(result, s)
         self.assertEqual(s.record(D(2026, 8, 17))["tri"], 456.0)
 
     def test_anchor_is_the_last_close_when_the_level_is_stale(self):

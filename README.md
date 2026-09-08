@@ -218,8 +218,12 @@ Two consequences worth stating plainly:
 
 - One runner a day idles for up to 3 hours. Actions minutes are not metered on a public
   repository, so this costs nothing, but it is real machine time.
-- The Actions tab shows 24 runs a day. All but one finish in seconds; the step summary on each
-  says which branch of the table it took and why.
+- The Actions tab shows about 24 runs a day. Most finish in seconds, and each one's step summary
+  says which branch of the table it took and why. **On a delivery day two or three runs will show
+  as `cancelled`, and that is correct.** The workflow allows one pending run at a time, so while
+  the delivering run sits sleeping, each newly queued hourly attempt takes the pending slot from
+  the one before it. Only pending runs are ever displaced — the sleeping run is *in progress*, so
+  it cannot be the one cancelled, and delivery is unaffected.
 
 Weekday selection is deliberately *not* in the cron line. Attempts run around the clock, so one
 on Friday evening is aiming at Monday, and the gate resolves that itself. (11:11 IST and 05:41

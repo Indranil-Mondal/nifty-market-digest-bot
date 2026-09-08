@@ -44,8 +44,12 @@ name: Morning digest
 # Two consequences, stated honestly:
 #   * One runner a day idles for up to 3 hours. Actions minutes are not metered on a public
 #     repository, so this costs nothing, but it is real machine time and worth knowing about.
-#   * The Actions tab shows 24 runs a day. All but one finish in seconds, and each one's step
-#     summary says which branch of the gate it took and why.
+#   * The Actions tab shows about 24 runs a day. Most finish in seconds and say in their step
+#     summary which branch of the gate they took and why. On a delivery day you will ALSO see a
+#     couple marked "cancelled", which is expected and not a fault: the concurrency group below
+#     allows one pending run, so while the delivering run sleeps, each newly queued hourly run
+#     replaces the previously queued one. Only *pending* runs are ever cancelled -- the sleeping
+#     run is in progress, so it is never the one displaced, and delivery is unaffected.
 #
 # If you would rather have exact timing with no idling, drive workflow_dispatch from an external
 # free scheduler — dispatch runs start within seconds. That costs an account and a stored token

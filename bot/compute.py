@@ -83,12 +83,20 @@ class FetchResult:
         self.readings[name] = Reading(value=value, as_of=as_of, freshness=freshness, source=source)
 
 
-def persist(result: FetchResult, series: Series, today: dt.date) -> None:
+def persist(result: FetchResult, series: Series) -> None:
     """Write everything a provider learned into the history store.
 
-    Intraday values are deliberately NOT stored against today's date: an 11:11 snapshot is not
-    a close, and storing it would corrupt tomorrow's "previous day" comparison. Only values
-    that are already final (a published close, a published NAV) are persisted.
+    Intraday values are deliberately NOT stored: an 11:11 snapshot is not a close, and storing it
+    would corrupt tomorrow's "previous day" comparison. Only values that are already final (a
+    published close, a published NAV) are persisted.
+
+    The test for that is the freshness flag alone, and deliberately not the date. A second guard
+    used to sit below it -- `as_of >= today and freshness == LIVE` -- which was unreachable, since
+    the check above already returns on LIVE. Deleting it rather than "repairing" it is the right
+    call: dropping the freshness half would make the guard reject a same-day FINAL figure, and a
+    run firing late under LATE_GRACE (up to 19:11 IST) starts after the 15:30 close, where today's
+    real closing values are exactly what it should be storing. The rule is "not live", not "not
+    today".
     """
     for when, fields in result.history.items():
         series.upsert(when, fields)
@@ -98,8 +106,6 @@ def persist(result: FetchResult, series: Series, today: dt.date) -> None:
         if reading.value is None or reading.as_of is None:
             continue
         if reading.freshness == FRESHNESS_LIVE:
-            continue
-        if reading.as_of >= today and reading.freshness == FRESHNESS_LIVE:
             continue
         series.upsert(reading.as_of, {name: reading.value})
         final[name] = reading.value

@@ -113,7 +113,7 @@ def build_digest(args: argparse.Namespace) -> tuple[Digest, list[str], Optional[
             result.errors.append(f"fetcher crashed: {exc.__class__.__name__}")
 
         try:
-            persist(result, series, today)
+            persist(result, series)
             snapshot = build_snapshot(spec, series, result, today)
         except Exception as exc:  # noqa: BLE001 - as above, but for the maths
             log.exception("%s snapshot build raised", spec.key)

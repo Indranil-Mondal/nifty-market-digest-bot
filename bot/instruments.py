@@ -13,6 +13,7 @@ not used as the comparison basis.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from dataclasses import dataclass
 from functools import partial
 from typing import Callable
@@ -23,6 +24,8 @@ from .sources import bse, fx, gold, gsr, nse, russell_tech, silver, vix
 from .state import Series
 
 Fetcher = Callable[[Http, Series, InstrumentSpec, dt.date], FetchResult]
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,30 @@ class Registration:
 TRI_EOD_NOTE = "TRI and PE publish after close, so both are as of the last completed session"
 
 
+def with_fx(fetcher: Fetcher, rupee: fx.UsdInr) -> Fetcher:
+    """Attach the day's USD/INR to an instrument priced in rupees but driven in dollars.
+
+    Wrapped here rather than plumbed through each source, so the registry stays the one place
+    that answers "which blocks show the rupee, and why" -- and so a source module keeps knowing
+    only about its own upstream.
+
+    Strictly additive. The rate is context for the block, not part of it, so a failure inside the
+    rate fetch -- however unexpected -- may cost the reader the rupee line and nothing else. Every
+    known failure path in fx.py already returns None; this guards the ones nobody has seen yet,
+    which would otherwise discard a gold or silver block that had already fetched cleanly.
+    """
+    def wrapped(http: Http, series: Series, spec: InstrumentSpec, today: dt.date) -> FetchResult:
+        result = fetcher(http, series, spec, today)
+        try:
+            result.fx = rupee.rate(http)
+        except Exception:  # noqa: BLE001 -- containment, not handling
+            log.warning("USD/INR unavailable for %s; block continues without it", spec.key,
+                        exc_info=True)
+            result.fx = None
+        return result
+    return wrapped
+
+
 def build_registry() -> list[Registration]:
     # One shared LiveIndicesWatch fetch serves every NIFTY instrument.
     live = nse.LiveWatch()
@@ -44,19 +71,6 @@ def build_registry() -> list[Registration]:
 
     def nifty(index: nse.NiftyIndex) -> Fetcher:
         return partial(nse.fetch, index=index, live=live)
-
-    def with_fx(fetcher: Fetcher) -> Fetcher:
-        """Attach the day's USD/INR to an instrument priced in rupees but driven in dollars.
-
-        Wrapped here rather than plumbed through each source, so the registry stays the one place
-        that answers "which blocks show the rupee, and why" -- and so a source module keeps
-        knowing only about its own upstream.
-        """
-        def wrapped(http: Http, series: Series, spec: InstrumentSpec, today: dt.date) -> FetchResult:
-            result = fetcher(http, series, spec, today)
-            result.fx = rupee.rate(http)
-            return result
-        return wrapped
 
     return [
         Registration(
@@ -79,6 +93,12 @@ def build_registry() -> list[Registration]:
                 basis="tri",
                 basis_label="TRI (total return)",
                 has_pe=True,
+                # BSE publishes valuation as one CSV per trading date, so the bot fetches PE only
+                # at the nine dates the table needs. What accumulates is nine sliding clusters,
+                # not a year, and a percentile over that would be a number without a meaning.
+                # Declined explicitly rather than left to the point-count floor -- see README
+                # "Honest gaps".
+                pe_range=False,
                 notes=(
                     TRI_EOD_NOTE,
                     'formerly "S&P BSE 250 SmallCap" — co-brand retired',
@@ -117,7 +137,7 @@ def build_registry() -> list[Registration]:
                 # it hit six on Mon 29 Dec 2025 with nothing wrong.
                 stale_after_days=9,
             ),
-            with_fx(russell_tech.fetch),
+            with_fx(russell_tech.fetch, rupee),
         ),
         Registration(
             InstrumentSpec(
@@ -133,7 +153,7 @@ def build_registry() -> list[Registration]:
                     'benchmark "domestic price of gold" is an internal AMC formula, not a published index',
                 ),
             ),
-            with_fx(gold.fetch),
+            with_fx(gold.fetch, rupee),
         ),
         Registration(
             InstrumentSpec(
@@ -148,7 +168,7 @@ def build_registry() -> list[Registration]:
                     "physically backed; one unit is about a tenth of a gram of silver",
                 ),
             ),
-            with_fx(silver.fetch),
+            with_fx(silver.fetch, rupee),
         ),
         Registration(
             InstrumentSpec(

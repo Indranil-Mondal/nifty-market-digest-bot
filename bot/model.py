@@ -111,6 +111,7 @@ class Snapshot:
     pe_position: Optional[RangePosition] = None      # PE against its own 1Y distribution
     lead_position: Optional[RangePosition] = None    # the headline number against its 1Y range
     lead_range: str = "distance"                     # see InstrumentSpec.lead_range
+    pe_range: bool = True                            # see InstrumentSpec.pe_range
     fx: Optional[FxRate] = None
     # Human-facing caveats ("TRI publishes after close") and machine failures, kept apart so
     # expected limitations are not presented to the user as errors.

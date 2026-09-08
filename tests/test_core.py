@@ -23,7 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bot import format as fmt
 from bot import news as news_mod
 from bot import notify
-from bot.compute import FetchResult, InstrumentSpec, build_snapshot, persist
+from bot.compute import FetchResult, InstrumentSpec, _locate_in_range, build_snapshot, persist
+from bot.instruments import build_registry, with_fx
 from bot.ledger import NewsLedger, SendLedger
 from bot.model import (
     FRESHNESS_LIVE,
@@ -1240,6 +1241,84 @@ class TestLeadIsSingleSourced(unittest.TestCase):
             snap.changes = {"1D": Change(label="1D", pct=0.5)}
             head = fmt._headline(snap, dt.datetime(2026, 9, 9, 11, 11))[0]
             self.assertIn(f"{value:,.2f}", head)
+
+
+class TestRangeAnchors(unittest.TestCase):
+    """Each range window ends at its own series' newest close, and an instrument can decline."""
+
+    def _series(self) -> Series:
+        s = Series("k", Path("unused.json"))
+        day = D(2025, 8, 1)
+        while day <= D(2026, 9, 7):
+            if day.weekday() < 5:
+                n = day.toordinal()
+                s.upsert(day, {"tri": 100.0 + n % 50, "level": 80.0 + n % 40, "pe": 20.0 + n % 10})
+            day += dt.timedelta(days=1)
+        # The price has closed one more session than the TRI has published.
+        s.upsert(D(2026, 9, 8), {"level": 999.0})
+        return s
+
+    def test_the_price_window_ends_at_the_price_series_not_the_basis_anchor(self):
+        snap = Snapshot(key="k", display="K")
+        snap.level = Reading(value=999.0, as_of=D(2026, 9, 8), freshness=FRESHNESS_PREV_CLOSE)
+        _locate_in_range(snap, self._series(), D(2026, 9, 7))   # the TRI anchor, a day behind
+        self.assertEqual(snap.lead_position.last, D(2026, 9, 8))
+        self.assertEqual(snap.lead_position.high, 999.0)
+        self.assertIn("at its 1Y high", " ".join(fmt._context(snap)))
+
+    def test_a_series_with_nothing_stored_falls_back_to_the_anchor(self):
+        snap = Snapshot(key="k", display="K")
+        snap.level = Reading(value=1.0, as_of=D(2026, 9, 8))
+        _locate_in_range(snap, Series("k", Path("unused.json")), D(2026, 9, 7))
+        self.assertIsNone(snap.lead_position)
+
+    def test_an_instrument_can_decline_the_pe_percentile(self):
+        s = self._series()
+        for pe_range in (True, False):
+            snap = Snapshot(key="k", display="K", pe_range=pe_range)
+            snap.level = Reading(value=90.0, as_of=D(2026, 9, 8))
+            snap.pe = Reading(value=25.0, as_of=D(2026, 9, 7))
+            _locate_in_range(snap, s, D(2026, 9, 7))
+            self.assertEqual(snap.pe_position is not None, pe_range)
+            self.assertIsNotNone(snap.lead_position)   # declining PE never silences the price
+
+    def test_bse_is_the_one_instrument_that_declines(self):
+        specs = {r.spec.key: r.spec for r in build_registry()}
+        self.assertFalse(specs["bse_250_smallcap"].pe_range)
+        for key, spec in specs.items():
+            if key != "bse_250_smallcap":
+                self.assertTrue(spec.pe_range, key)
+
+
+class TestFxDecorationIsAdditive(unittest.TestCase):
+    """A rupee problem may cost the reader the rupee line, never the block it decorates."""
+
+    def test_a_failing_rate_fetch_leaves_the_block_intact(self):
+        base = FetchResult()
+        base.add("nav", 23.4, as_of=D(2026, 9, 8), source="test")
+
+        class Exploding:
+            def rate(self, http):
+                raise RuntimeError("yahoo changed shape")
+
+        spec = InstrumentSpec(key="k", display="K")
+        wrapped = with_fx(lambda http, series, spec, today: base, Exploding())
+        with self.assertLogs("bot.instruments", level="WARNING"):
+            result = wrapped(None, None, spec, D(2026, 9, 8))
+        self.assertIs(result, base)
+        self.assertIsNone(result.fx)
+        self.assertTrue(result.readings["nav"].known)
+
+    def test_a_working_rate_is_attached(self):
+        base = FetchResult()
+
+        class Steady:
+            def rate(self, http):
+                return FxRate(rate=94.81, as_of=D(2026, 9, 8), pct_1y=7.5)
+
+        wrapped = with_fx(lambda http, series, spec, today: base, Steady())
+        result = wrapped(None, None, InstrumentSpec(key="k", display="K"), D(2026, 9, 8))
+        self.assertEqual(result.fx.rate, 94.81)
 
 
 if __name__ == "__main__":

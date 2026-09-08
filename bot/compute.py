@@ -70,6 +70,12 @@ class InstrumentSpec:
     #                   "60% off the high" reads like a loss when it actually means "calm".
     #   "none"       -- the instrument already reports its own position in a note.
     lead_range: str = "distance"
+    # Whether to locate the PE inside its own trailing year. False where the stored PE series is
+    # not a picture of the year: BSE is fetched one date at a time, only at the nine dates the
+    # table needs, so what accumulates on disk is nine sliding clusters. Left to the point-count
+    # floor alone, that block would start printing a percentile the day the count crept past
+    # thirty, over a sample that looks nothing like the distribution it claims to describe.
+    pe_range: bool = True
 
 
 @dataclass
@@ -148,7 +154,7 @@ def build_snapshot(
     today: dt.date,
 ) -> Snapshot:
     snapshot = Snapshot(key=spec.key, display=spec.display, kind=spec.kind,
-                        lead_range=spec.lead_range)
+                        lead_range=spec.lead_range, pe_range=spec.pe_range)
 
     for name in ("level", "tri", "nav", "inav", "pe", "pb", "div_yield"):
         reading = result.readings.get(name)
@@ -322,13 +328,17 @@ def _locate_in_range(snapshot: Snapshot, series: Series, anchor: dt.date) -> Non
     no request, no new upstream to break, and no new way to be wrong about a number -- the range
     is either computable from the stored series or it is omitted.
 
-    Both windows are trailing 365 days from the table's own anchor date, not from today, for the
-    same reason the lookback table is: at 11:11 the newest close is yesterday's, and measuring a
-    year from today would quietly include one fewer session at the far end.
+    Each window trails 365 days from the newest stored close of ITS OWN series -- not from the
+    table's anchor, and not from today. The table is anchored on the basis series, and the basis
+    can sit a session behind the price (TRI publishes after close; a NAV lands the next day), so
+    anchoring the price window there would leave its newest close out while the label still read
+    1Y. Anchoring on today would instead drop one session at the far end. The series' own last
+    date does neither. `anchor` is only the fallback for a series with nothing stored yet.
     """
     lead_reading, lead_field = snapshot.lead
     if lead_reading.known:
-        values, first, last = trailing_window(series.points(lead_field), anchor)
+        _, newest = series.latest(lead_field)
+        values, first, last = trailing_window(series.points(lead_field), newest or anchor)
         # The live intraday level is not in the stored series, so it is compared against the
         # window rather than being part of it -- which is correct: "off its 52-week high" should
         # measure today's price against the closes behind it.
@@ -336,6 +346,7 @@ def _locate_in_range(snapshot: Snapshot, series: Series, anchor: dt.date) -> Non
             lead_reading.value, values, first=first, last=last,
         )
 
-    if snapshot.pe.known:
-        values, first, last = trailing_window(series.points("pe"), anchor)
+    if snapshot.pe.known and snapshot.pe_range:
+        _, newest = series.latest("pe")
+        values, first, last = trailing_window(series.points("pe"), newest or anchor)
         snapshot.pe_position = range_position(snapshot.pe.value, values, first=first, last=last)

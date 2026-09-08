@@ -302,9 +302,11 @@ primary source before being written off.
 its own trailing year; this one does not, and the reason is a deliberate trade rather than a
 missing source. BSE publishes valuation in one static CSV *per trading date*, so a year of PE
 history costs about 250 requests, where NSE returns the whole series in one call. The bot fetches
-only the nine dates the lookback table needs, which is far too few observations to call anything
-a percentile — so it declines to print one. The PE itself, and PE at each lookback date, are
-both there.
+only the nine dates the lookback table needs. Those do accumulate on disk, but nine sliding dates a
+day build a sample clustered around the lookback points, not a picture of the year — so the
+instrument is opted out explicitly (`pe_range=False` in the registry) rather than left to start
+printing a percentile the day the stored count creeps past the floor. The PE itself, and PE at
+each lookback date, are both there.
 
 **India VIX from NSE itself.** NSE computes and publishes it, but the only programmatic route is
 `nseindia.com`, the one host this project refuses to depend on (Akamai Bot Manager, and cloud IPs
@@ -457,7 +459,7 @@ python -m venv .venv
 .venv/Scripts/python -m scripts.smoke               # fetch everything, print the digest
 .venv/Scripts/python -m scripts.diagnose            # reachability table for every source
 .venv/Scripts/python -m scripts.news_check          # probe feeds, show what scoring picks
-.venv/Scripts/python -m unittest discover -s tests  # 136 tests, no network
+.venv/Scripts/python -m unittest discover -s tests  # 142 tests, no network
 .venv/Scripts/python scripts/render_sample.py       # regenerate the README screenshot
 ```
 

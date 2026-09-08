@@ -39,6 +39,12 @@ log = logging.getLogger(__name__)
 # A basis value older than this many days means the source has stopped updating.
 STALE_AFTER_DAYS = 6
 
+# How far back the headline price may look for its OWN previous close before the comparison
+# stops being a "day" move. A long weekend plus a two-day holiday cluster is the worst normal
+# case and lands inside five days; anything beyond that is a gap in the series, and a gap must
+# produce no percentage rather than a multi-week move wearing a 1D label.
+LEVEL_DAY_MAX_SLACK_DAYS = 5
+
 
 @dataclass(frozen=True)
 class InstrumentSpec:
@@ -221,6 +227,7 @@ def build_snapshot(
     else:
         snapshot.pe_then = {}
 
+    snapshot.basis_field = basis
     label = spec.basis_label or basis
     if basis != spec.basis:
         snapshot.change_basis = f"{basis} (fallback — {spec.basis} unavailable), to {anchor_date:%d %b}"
@@ -249,7 +256,13 @@ def build_snapshot(
         prior = snapshot.level.as_of - dt.timedelta(days=1)
         prev, prev_date = series.as_of(snapshot.level.as_of, "prev_close")
         if prev is None or prev_date != snapshot.level.as_of:
-            prev, prev_date = series.as_of(prior, "level")
+            # Bounded, unlike every other lookback in this file. as_of's twelve-day default is
+            # right for snapping "three months ago" onto a real session and completely wrong
+            # here: on 9 Sep 2026 the two NSE TRI indices held only three stored levels, so this
+            # lookup reached back to 28 Aug and the Midcap 150 headline printed "-1.77%" beside
+            # a price whose actual day move was +0.12%. An eleven-day move with a 1D label is a
+            # worse failure than no label at all.
+            prev, prev_date = series.as_of(prior, "level", max_slack_days=LEVEL_DAY_MAX_SLACK_DAYS)
             base_label = f"{prev_date:%d %b} close" if prev_date else "previous close"
         else:
             prev_date, base_label = None, "previous close"

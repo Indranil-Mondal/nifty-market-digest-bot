@@ -79,7 +79,8 @@ class Snapshot:
     pb: Reading = field(default_factory=Reading)
     div_yield: Reading = field(default_factory=Reading)
     # Which series the percentage moves were computed on, so the digest can say so.
-    change_basis: str = "level"
+    change_basis: str = "level"          # prose, for the reader
+    basis_field: str = "level"           # the raw field name, for code that must branch on it
     changes: dict[str, Change] = field(default_factory=dict)
     # The traded price's OWN day move, set only when the lookback table is computed on some
     # other series (a fund NAV) whose newest point is from a different session. Without it the

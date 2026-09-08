@@ -132,10 +132,12 @@ def _headline(snapshot: Snapshot, generated_at: dt.datetime) -> list[str]:
         lead, lead_name = snapshot.nav, "NAV"
 
     day = snapshot.changes.get("1D")
-    # When the table runs on a fund NAV, that NAV's move belongs to the NAV, not to the price
-    # printed beside it -- and the two can be from different sessions. Show the lead's own move.
-    if lead is snapshot.level and snapshot.level_day is not None and snapshot.level_day.known:
-        day = snapshot.level_day
+    # When the table runs on some other series -- a fund NAV, a total-return index -- that
+    # series' move belongs to it, not to the price printed beside it, and the two can even be
+    # from different sessions. So the price shows its OWN move or it shows none: borrowing the
+    # table's 1D is how the silver block came to print a 1.41% fall on a day the price rose.
+    if lead is snapshot.level and snapshot.basis_field != "level":
+        day = snapshot.level_day if (snapshot.level_day and snapshot.level_day.known) else None
     arrow = _arrow(day.pct if day else None)
     tag = _freshness_tag(lead, generated_at)
     line = f"<code>{esc(_reading(lead))}</code>"

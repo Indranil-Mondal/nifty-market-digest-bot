@@ -231,8 +231,12 @@ def fetch(
     result = FetchResult()
 
     # --- how far back to ask ------------------------------------------------------------
+    # Both the basis series and the price series must be healthy, not just the basis. The price
+    # is what the digest prints as the headline for EVERY index, so its previous close is needed
+    # whatever the table is computed on -- see the price-history block below.
     _, newest = series.latest("tri" if spec.basis == "tri" else "level")
-    if newest is None or len(series.dates_with(spec.basis)) < MIN_HEALTHY_POINTS:
+    thin = min(len(series.dates_with(spec.basis)), len(series.dates_with("level")))
+    if newest is None or thin < MIN_HEALTHY_POINTS:
         start = today - dt.timedelta(days=COLD_START_DAYS)
     else:
         start = newest - dt.timedelta(days=WARM_OVERLAP_DAYS)
@@ -265,17 +269,25 @@ def fetch(
         for when, fields in folded.items():
             result.history.setdefault(when, {}).update(fields)
 
-    # --- price history, only when the lookback table is computed on the price index -------
-    if spec.basis == "level":
-        rows, error = _backpage(http, "getHistoricaldatatabletoString", index, start, today)
-        if error:
-            result.errors.append(error)
-        else:
-            folded, schema_error = _series_from_rows(rows, "HistoricalDate", {"CLOSE": "level"})
-            if schema_error:
-                result.errors.append(f"price feed shape changed: {schema_error}")
-            for when, fields in folded.items():
-                result.history.setdefault(when, {}).update(fields)
+    # --- price history --------------------------------------------------------------------
+    # Fetched for every index, including the ones whose lookback table runs on TRI. It used to
+    # be skipped for those, on the reasoning that nothing read the price series -- but the
+    # HEADLINE reads it: the number at the top of each block is the price level, and the arrow
+    # beside it is that price's own day move. With no price history the only levels ever stored
+    # were the accidental ones from a market-shut LiveIndicesWatch response, which left Midcap
+    # 150 and Smallcap 250 holding three levels apiece across four months.
+    #
+    # Cost is one extra POST per TRI index per run -- two a day, against a source that answers a
+    # fifteen-month range in a single call.
+    rows, error = _backpage(http, "getHistoricaldatatabletoString", index, start, today)
+    if error:
+        result.errors.append(error)
+    else:
+        folded, schema_error = _series_from_rows(rows, "HistoricalDate", {"CLOSE": "level"})
+        if schema_error:
+            result.errors.append(f"price feed shape changed: {schema_error}")
+        for when, fields in folded.items():
+            result.history.setdefault(when, {}).update(fields)
 
     for when, fields in result.history.items():
         series.upsert(when, fields)

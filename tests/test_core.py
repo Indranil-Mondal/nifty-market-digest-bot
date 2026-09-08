@@ -941,6 +941,88 @@ class TestAmfiLayout(unittest.TestCase):
         self.assertEqual((columns.isin_growth, columns.nav, columns.date), (4, 6, 7))
 
 
+class TestHeadlineDayMove(unittest.TestCase):
+    """The arrow beside the headline price must belong to that price, on that day.
+
+    Two separate ways this has gone wrong, both shipped, both caught by eye rather than by a
+    test:
+
+      * Borrowing the table's 1D. The table may be computed on a fund NAV from an earlier
+        session, so on 8 Sep 2026 the silver block printed "23.46 -1.41%" on a day the price
+        had risen 0.47%.
+      * Fixing that, then resolving "the previous close" through as_of's twelve-day default
+        slack. The two NSE TRI indices stored only three price points, so Midcap 150 compared
+        8 Sep against 28 Aug and printed -1.77% where the real day move was +0.12%.
+
+    A wrong percentage in the headline is the worst defect this project can ship: it is the
+    number a reader takes away, and it looks perfectly ordinary.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.today = D(2026, 9, 9)
+        self.spec = InstrumentSpec(
+            key="tri_index", display="AN INDEX TRI", basis="tri",
+            basis_label="TRI (total return)", has_pe=False,
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _snapshot(self, level_dates):
+        """A full daily TRI series, but levels only on the dates given."""
+        s = Series.load("tri_index", self.root)
+        day = D(2025, 9, 1)
+        while day <= D(2026, 9, 8):
+            if day.weekday() < 5:
+                s.upsert(day, {"tri": 29000.0})
+            day += dt.timedelta(days=1)
+        for when, value in level_dates.items():
+            s.upsert(when, {"level": value})
+        s.upsert(D(2026, 9, 8), {"tri": 29511.78})
+        result = FetchResult()
+        result.add("tri", 29511.78, as_of=D(2026, 9, 8), freshness=FRESHNESS_PREV_CLOSE)
+        result.add("level", 23089.95, as_of=D(2026, 9, 8), freshness=FRESHNESS_PREV_CLOSE)
+        return build_snapshot(self.spec, s, result, self.today)
+
+    def test_the_day_move_uses_the_previous_session(self):
+        snap = self._snapshot({D(2026, 9, 7): 23062.25, D(2026, 9, 8): 23089.95})
+        self.assertIsNotNone(snap.level_day)
+        self.assertAlmostEqual(snap.level_day.pct, 0.120, places=2)
+
+    def test_a_gap_in_the_price_series_yields_no_day_move_at_all(self):
+        # 28 Aug is the only prior level held -- eleven days back. That is not a day move, and
+        # the honest output is no percentage rather than a plausible-looking wrong one.
+        snap = self._snapshot({D(2026, 8, 28): 23507.15, D(2026, 9, 8): 23089.95})
+        self.assertIsNone(snap.level_day)
+
+    def test_a_long_weekend_is_still_a_day_move(self):
+        # Thursday close to the following Tuesday: five days, the worst normal case.
+        snap = self._snapshot({D(2026, 9, 3): 23220.5, D(2026, 9, 8): 23089.95})
+        self.assertIsNotNone(snap.level_day)
+
+    def test_the_renderer_never_borrows_the_tables_1D_for_the_price(self):
+        snap = self._snapshot({D(2026, 8, 28): 23507.15, D(2026, 9, 8): 23089.95})
+        snap.changes["1D"] = Change(label="1D", pct=0.12)   # the TRI's move, not the price's
+        head = fmt._headline(snap, dt.datetime(2026, 9, 9, 11, 11))[0]
+        self.assertIn("23,089.95", head)
+        self.assertNotIn("0.12", head)
+        self.assertNotIn("%", head)
+
+    def test_an_index_whose_table_runs_on_price_still_shows_its_1D(self):
+        # basis == "level": the table's 1D IS the price's own move, so it must survive.
+        spec = InstrumentSpec(key="plain", display="PLAIN", basis="level", has_pe=False)
+        s = Series.load("plain", self.root)
+        s.upsert(D(2026, 9, 7), {"level": 23000.0})
+        s.upsert(D(2026, 9, 8), {"level": 23100.0})
+        result = FetchResult()
+        result.add("level", 23100.0, as_of=D(2026, 9, 8), freshness=FRESHNESS_PREV_CLOSE)
+        snap = build_snapshot(spec, s, result, self.today)
+        head = fmt._headline(snap, dt.datetime(2026, 9, 9, 11, 11))[0]
+        self.assertIn("%", head)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

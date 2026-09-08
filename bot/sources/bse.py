@@ -104,6 +104,7 @@ def _prtr_history(
         return {}, "BSE total-return endpoint returned no rows (check date format)"
 
     out: dict[dt.date, dict[str, float]] = {}
+    out_of_window = 0
     for row in payload:
         if not isinstance(row, dict):
             continue
@@ -112,6 +113,14 @@ def _prtr_history(
             ("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y"),
         )
         if when is None:
+            continue
+        # m/d/Y and d/m/Y are indistinguishable for any day of the month up to 12, so if BSE
+        # ever switched convention "9/8/2026" would read as 9 August instead of 8 September --
+        # a wrong DATE on a right value, which would silently corrupt every lookback that
+        # snapped to it. The requested window is the only independent check available, so a
+        # row outside it is dropped rather than believed.
+        if not (start <= when <= end):
+            out_of_window += 1
             continue
         fields: dict[str, float] = {}
         price = parse_float(row.get("PRValue"))
@@ -122,6 +131,16 @@ def _prtr_history(
             fields["tri"] = total
         if fields:
             out[when] = fields
+    if out_of_window:
+        if out_of_window > len(out):
+            # Most of the response landing outside the window we asked for is not bad data, it
+            # is a different date convention. Refuse the lot rather than keep the half that
+            # happens to parse either way.
+            return {}, (
+                f"BSE returned {out_of_window} row(s) dated outside {start}..{end}; "
+                "the TransDate format may have changed"
+            )
+        log.warning("BSE: dropped %s row(s) dated outside %s..%s", out_of_window, start, end)
     if not out:
         return {}, "BSE total-return rows could not be parsed"
     return out, None
@@ -209,7 +228,16 @@ def fetch(
     needed = [anchor, *lookback_targets(anchor).values()]
     fetched_pe = 0
     for target in needed:
-        existing, _ = series.as_of(target, "pe")
+        # The anchor must match EXACTLY; a historical lookback may legitimately snap back a few
+        # days to the last session that published.
+        #
+        # as_of's default slack of 12 days is right for snapping a lookback onto a real trading
+        # day and quite wrong as a "do I already have this?" test: a PE from twelve days ago
+        # counted as a hit and suppressed the refresh, so on 9 Sep 2026 this block was printing
+        # the 31 Aug PE of 35.23 while the live CSV said 35.58 for 8 Sep. Same function, two
+        # incompatible jobs.
+        slack = 0 if target == anchor else 4
+        existing, _ = series.as_of(target, "pe", max_slack_days=slack)
         if existing is not None:
             continue
         found, fields = _allindices_for_date(http, index, target)

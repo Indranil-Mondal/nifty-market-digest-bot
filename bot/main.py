@@ -162,7 +162,7 @@ def build_digest(args: argparse.Namespace) -> tuple[Digest, list[str], Optional[
         for snapshot in digest.snapshots
         if any(
             getattr(snapshot, name).known and getattr(snapshot, name).freshness == FRESHNESS_STALE
-            for name in ("level", "tri", "nav")
+            for name in ("level", "tri", "nav", "inav", "pe", "pb", "div_yield")
         )
     ]
     if stale:

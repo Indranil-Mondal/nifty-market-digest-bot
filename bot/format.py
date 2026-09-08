@@ -67,6 +67,16 @@ def _reading(reading: Reading, places: int = 2) -> str:
     return _num(reading.value, places)
 
 
+def _stale(reading: Reading) -> str:
+    """Marker for a figure whose source has stopped updating.
+
+    _freshness_tag only ever runs on the headline number, so a NAV that had frozen rendered as a
+    bare "NAV 126.38" with nothing to distinguish it from a fresh one -- invisible for exactly
+    the two instruments that went stale for three weeks in Aug 2026.
+    """
+    return " ⚠" if reading.freshness == FRESHNESS_STALE else ""
+
+
 def _freshness_tag(reading: Reading, generated_at: dt.datetime) -> str:
     """Short parenthetical describing how current a headline number is."""
     if not reading.known:
@@ -138,11 +148,11 @@ def _headline(snapshot: Snapshot, generated_at: dt.datetime) -> list[str]:
     # Second line: whichever of TRI / NAV / iNAV exist and are not already the lead.
     extras: list[str] = []
     if snapshot.tri.known and lead is not snapshot.tri:
-        extras.append(f"TRI {esc(_reading(snapshot.tri))}")
+        extras.append(f"TRI {esc(_reading(snapshot.tri))}{_stale(snapshot.tri)}")
     if snapshot.nav.known and lead is not snapshot.nav:
-        extras.append(f"NAV {esc(_reading(snapshot.nav))}")
+        extras.append(f"NAV {esc(_reading(snapshot.nav))}{_stale(snapshot.nav)}")
     if snapshot.inav.known:
-        extras.append(f"iNAV {esc(_reading(snapshot.inav))}")
+        extras.append(f"iNAV {esc(_reading(snapshot.inav))}{_stale(snapshot.inav)}")
     elif snapshot.kind == "etf":
         extras.append(f"iNAV {DASH}")
     if extras:
@@ -151,11 +161,11 @@ def _headline(snapshot: Snapshot, generated_at: dt.datetime) -> list[str]:
     # Third line: valuation, only where it exists.
     valuation: list[str] = []
     if snapshot.pe.known:
-        valuation.append(f"PE {esc(_num(snapshot.pe.value, 2, thousands=False))}")
+        valuation.append(f"PE {esc(_num(snapshot.pe.value, 2, thousands=False))}{_stale(snapshot.pe)}")
     if snapshot.pb.known:
-        valuation.append(f"PB {esc(_num(snapshot.pb.value, 2, thousands=False))}")
+        valuation.append(f"PB {esc(_num(snapshot.pb.value, 2, thousands=False))}{_stale(snapshot.pb)}")
     if snapshot.div_yield.known:
-        valuation.append(f"DY {esc(_num(snapshot.div_yield.value, 2, thousands=False))}%")
+        valuation.append(f"DY {esc(_num(snapshot.div_yield.value, 2, thousands=False))}%{_stale(snapshot.div_yield)}")
     if valuation:
         out.append(" · ".join(valuation))
 

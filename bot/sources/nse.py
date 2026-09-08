@@ -134,18 +134,32 @@ def _series_from_rows(
     rows: list[dict[str, Any]],
     date_key: str,
     mapping: dict[str, str],
-) -> dict[dt.date, dict[str, float]]:
-    """Fold API rows into {date: {field: value}}.
+) -> tuple[dict[dt.date, dict[str, float]], Optional[str]]:
+    """Fold API rows into ({date: {field: value}}, error).
 
     The date key differs per endpoint — `Date` for TRI, `DATE` for PE, `HistoricalDate` for
     OHLC — so it is passed in rather than guessed. Values arrive as strings and may be
     leading-dot decimals like '.57' or '-.12'.
+
+    THE ERROR IS THE POINT. Every key here is a spelling niftyindices chose and can change, and
+    a rename is the same failure AMFI inflicted in Aug 2026: rows keep arriving, nothing matches,
+    the fetch looks empty rather than broken, and the digest reprints cached numbers until
+    somebody notices by eye. AMFI was caught only because a redundant ISIN check happened to
+    object; there is no equivalent here, so the mismatch has to be detected directly.
+
+    Rows that carry the date key but none of the mapped value keys are therefore counted, and if
+    that is ALL of them the caller is told the schema no longer matches. A partially populated
+    row is normal (NTR_Value is the literal '-' for every index except Nifty 50), so only a
+    complete miss is treated as a fault.
     """
     out: dict[dt.date, dict[str, float]] = {}
+    dated = 0
+    empty = 0
     for row in rows:
         when = _parse_response_date(row.get(date_key))
         if when is None:
             continue
+        dated += 1
         fields: dict[str, float] = {}
         for source_key, field in mapping.items():
             value = parse_float(row.get(source_key))
@@ -157,7 +171,22 @@ def _series_from_rows(
             fields[field] = value
         if fields:
             out[when] = fields
-    return out
+        else:
+            empty += 1
+
+    if rows and dated == 0:
+        sample = sorted(rows[0].keys())[:8] if isinstance(rows[0], dict) else []
+        return out, (
+            f"date key {date_key!r} not present in any of {len(rows)} row(s); "
+            f"keys look like {sample}"
+        )
+    if dated and empty == dated:
+        sample = sorted(rows[0].keys())[:8] if isinstance(rows[0], dict) else []
+        return out, (
+            f"none of {sorted(mapping)} present in any of {dated} row(s); "
+            f"keys look like {sample}"
+        )
+    return out, None
 
 
 class LiveWatch:
@@ -215,7 +244,12 @@ def fetch(
     else:
         # NTR_Value is a real number only for Nifty 50; it is the literal '-' elsewhere, which
         # parse_float correctly reads as None.
-        for when, fields in _series_from_rows(rows, "Date", {"TotalReturnsIndex": "tri", "NTR_Value": "ntr"}).items():
+        folded, schema_error = _series_from_rows(
+            rows, "Date", {"TotalReturnsIndex": "tri", "NTR_Value": "ntr"}
+        )
+        if schema_error:
+            result.errors.append(f"TRI feed shape changed: {schema_error}")
+        for when, fields in folded.items():
             result.history.setdefault(when, {}).update(fields)
 
     # --- valuation ----------------------------------------------------------------------
@@ -223,9 +257,12 @@ def fetch(
     if error:
         result.errors.append(error)
     else:
-        for when, fields in _series_from_rows(
+        folded, schema_error = _series_from_rows(
             rows, "DATE", {"pe": "pe", "pb": "pb", "divYield": "div_yield"}
-        ).items():
+        )
+        if schema_error:
+            result.errors.append(f"valuation feed shape changed: {schema_error}")
+        for when, fields in folded.items():
             result.history.setdefault(when, {}).update(fields)
 
     # --- price history, only when the lookback table is computed on the price index -------
@@ -234,7 +271,10 @@ def fetch(
         if error:
             result.errors.append(error)
         else:
-            for when, fields in _series_from_rows(rows, "HistoricalDate", {"CLOSE": "level"}).items():
+            folded, schema_error = _series_from_rows(rows, "HistoricalDate", {"CLOSE": "level"})
+            if schema_error:
+                result.errors.append(f"price feed shape changed: {schema_error}")
+            for when, fields in folded.items():
                 result.history.setdefault(when, {}).update(fields)
 
     for when, fields in result.history.items():

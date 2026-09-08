@@ -25,7 +25,15 @@ from bot import news as news_mod
 from bot import notify
 from bot.compute import FetchResult, InstrumentSpec, build_snapshot, persist
 from bot.ledger import NewsLedger, SendLedger
-from bot.model import FRESHNESS_LIVE, FRESHNESS_PREV_CLOSE, Change, Digest, Reading
+from bot.model import (
+    FRESHNESS_LIVE,
+    FRESHNESS_PREV_CLOSE,
+    FRESHNESS_STALE,
+    FRESHNESS_T1,
+    Change,
+    Digest,
+    Reading,
+)
 from bot.sources import amfi, bse, gsr, nse
 from bot.state import Series, Store
 from bot.util import (
@@ -710,6 +718,118 @@ class TestStore(unittest.TestCase):
             store.save_all()
             self.assertTrue((Path(tmp) / "x.json").exists())
             self.assertIn("x: 1 points", "\n".join(store.summary()))
+
+
+class TestStalenessGuard(unittest.TestCase):
+    """The net that should have caught the three-week NAV freeze on about day two.
+
+    The old check looked only at the basis series and only when the anchor was not live, so a
+    live price could mask a frozen NAV indefinitely -- which is exactly what happened to gold.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.today = D(2026, 9, 9)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _etf(self, nav_last: dt.date, level_last: dt.date, allowance: int = 6):
+        spec = InstrumentSpec(
+            key="metal", display="METAL ETF", kind="etf", basis="nav", basis_label="NAV",
+            has_pe=False, stale_after_days=allowance,
+        )
+        s = Series.load("metal", self.root)
+        day = D(2025, 9, 1)
+        while day <= max(nav_last, level_last):
+            if day.weekday() < 5:
+                if day <= nav_last:
+                    s.upsert(day, {"nav": 100.0})
+                if day <= level_last:
+                    s.upsert(day, {"level": 101.0})
+            day += dt.timedelta(days=1)
+        result = FetchResult()
+        result.add("nav", 100.0, as_of=nav_last, freshness=FRESHNESS_T1)
+        result.add("level", 101.0, as_of=level_last, freshness=FRESHNESS_PREV_CLOSE)
+        return build_snapshot(spec, s, result, self.today)
+
+    def test_a_normal_lag_is_not_flagged(self):
+        # NAV published for the previous session, price for yesterday's close. Business as usual.
+        snap = self._etf(nav_last=D(2026, 9, 8), level_last=D(2026, 9, 8))
+        self.assertNotEqual(snap.nav.freshness, FRESHNESS_STALE)
+        self.assertFalse([n for n in snap.notes if "stopped" in n])
+
+    def test_a_long_weekend_is_not_flagged(self):
+        # Four calendar days behind is the worst legitimate lag measured over 262 real runs.
+        snap = self._etf(nav_last=D(2026, 9, 5), level_last=D(2026, 9, 8))
+        self.assertNotEqual(snap.nav.freshness, FRESHNESS_STALE)
+
+    def test_a_frozen_nav_is_flagged_even_though_the_price_still_moves(self):
+        # Gold's exact failure: the price kept updating from BSE while AMFI gave nothing.
+        snap = self._etf(nav_last=D(2026, 8, 19), level_last=D(2026, 9, 8))
+        self.assertEqual(snap.nav.freshness, FRESHNESS_STALE)
+        self.assertNotEqual(snap.level.freshness, FRESHNESS_STALE)
+        self.assertTrue(
+            any("nav" in n and "stopped" in n for n in snap.notes),
+            f"expected a staleness note, got {snap.notes}",
+        )
+
+    def test_the_note_is_first_so_the_renderer_cannot_drop_it(self):
+        snap = self._etf(nav_last=D(2026, 8, 19), level_last=D(2026, 9, 8))
+        self.assertIn("stopped", snap.notes[0])
+
+    def test_a_longer_allowance_tolerates_the_overseas_fund(self):
+        # The feeder fund loses two market calendars and hit six days behind legitimately.
+        snap = self._etf(nav_last=D(2026, 9, 3), level_last=D(2026, 9, 3), allowance=9)
+        self.assertNotEqual(snap.nav.freshness, FRESHNESS_STALE)
+
+
+class TestUpstreamSchemaGuards(unittest.TestCase):
+    """A provider that renames a key must produce an ERROR, not an empty result.
+
+    This is the exact shape of the AMFI failure of Aug 2026: rows kept arriving, nothing
+    matched, the fetch looked empty rather than broken, and the digest reprinted cached numbers
+    for three weeks. AMFI was caught only because a redundant ISIN check objected; the NSE
+    endpoints have no such check, so the mismatch has to be detected directly.
+    """
+
+    ROWS = [
+        {"Date": "08 Sep 2026", "TotalReturnsIndex": "35913.37", "NTR_Value": "-"},
+        {"Date": "07 Sep 2026", "TotalReturnsIndex": "36134.02", "NTR_Value": "-"},
+    ]
+
+    def test_known_keys_parse_with_no_error(self):
+        out, error = nse._series_from_rows(self.ROWS, "Date", {"TotalReturnsIndex": "tri"})
+        self.assertIsNone(error)
+        self.assertEqual(out[D(2026, 9, 8)]["tri"], 35913.37)
+
+    def test_renamed_value_key_is_an_error_not_an_empty_result(self):
+        out, error = nse._series_from_rows(self.ROWS, "Date", {"TotalReturnIndexValue": "tri"})
+        self.assertEqual(out, {})
+        self.assertIsNotNone(error)
+        self.assertIn("TotalReturnIndexValue", error)
+
+    def test_renamed_date_key_is_an_error(self):
+        out, error = nse._series_from_rows(self.ROWS, "TradeDate", {"TotalReturnsIndex": "tri"})
+        self.assertEqual(out, {})
+        self.assertIsNotNone(error)
+        self.assertIn("TradeDate", error)
+
+    def test_a_partially_empty_column_is_not_an_error(self):
+        # NTR_Value is the literal '-' for every index except Nifty 50. That is normal data,
+        # not a schema change, and must not raise the alarm.
+        out, error = nse._series_from_rows(
+            self.ROWS, "Date", {"TotalReturnsIndex": "tri", "NTR_Value": "ntr"}
+        )
+        self.assertIsNone(error)
+        self.assertNotIn("ntr", out[D(2026, 9, 8)])
+
+    def test_no_rows_at_all_is_not_a_schema_error(self):
+        # An empty response is the caller's problem to report; it is not evidence of a rename.
+        out, error = nse._series_from_rows([], "Date", {"TotalReturnsIndex": "tri"})
+        self.assertEqual(out, {})
+        self.assertIsNone(error)
 
 
 class TestRateLimitBudget(unittest.TestCase):

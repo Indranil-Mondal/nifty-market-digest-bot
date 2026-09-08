@@ -51,6 +51,10 @@ class InstrumentSpec:
     basis_label: str = ""          # shown when basis is not the plain level
     has_pe: bool = True            # False for gold, where PE is meaningless
     notes: tuple[str, ...] = ()    # permanent caveats, e.g. NAV lag for an overseas FoF
+    # How many calendar days a figure may legitimately fall behind before the digest says the
+    # source has stopped. Six covers any weekend-plus-holiday run for a daily series; an
+    # overseas fund of fund needs longer because it loses two market calendars, not one.
+    stale_after_days: int = STALE_AFTER_DAYS
 
 
 @dataclass
@@ -151,12 +155,41 @@ def build_snapshot(
         snapshot.change_basis = basis
         return snapshot
 
-    if not anchor_is_live and (today - anchor_date).days > STALE_AFTER_DAYS:
-        snapshot.note(f"{basis} last updated {anchor_date:%d %b} — source may be stale")
-        for name in ("level", "tri", "nav"):
-            reading = getattr(snapshot, name)
-            if reading.known and reading.as_of == anchor_date:
-                reading.freshness = FRESHNESS_STALE
+    # Staleness, checked on EVERY displayed figure rather than only on the basis series.
+    #
+    # The old check had two holes and both hid real freezes. It looked at the basis alone, so
+    # NIFTY 50 -- whose basis is a live level from Azure -- could have had its TRI and PE frozen
+    # indefinitely without the branch ever being reached. And it was skipped entirely whenever
+    # the anchor was live, which is most mornings. Gold's price kept moving while its NAV sat
+    # still for three weeks.
+    #
+    # Calendar days, with a deliberately generous allowance. Measured over 262 weekday runs of
+    # this repository's own stored history, the lag printed at 11:11 IST never exceeded four
+    # calendar days for a daily series, or six for the overseas feeder fund. Six and nine
+    # therefore cannot fire on a normal Monday or through a holiday week, while still catching a
+    # genuine freeze within a couple of sessions instead of a couple of weeks.
+    # Notes are rendered in order and the renderer shows only the first few, so the two notes
+    # the machine discovers are placed at the front, ahead of the permanent caveats. This slot
+    # keeps them in priority order relative to each other: a source that has stopped outranks
+    # an explanation of which session a percentage belongs to.
+    priority_slot = 0
+    stale_fields = []
+    for name in ("level", "tri", "nav", "inav", "pe", "pb", "div_yield"):
+        reading = getattr(snapshot, name)
+        if not reading.known or reading.as_of is None:
+            continue
+        if reading.freshness == FRESHNESS_LIVE:
+            continue
+        if (today - reading.as_of).days > spec.stale_after_days:
+            reading.freshness = FRESHNESS_STALE
+            stale_fields.append(name)
+    if stale_fields:
+        oldest = min(getattr(snapshot, name).as_of for name in stale_fields)
+        snapshot.notes.insert(
+            priority_slot,
+            f"{', '.join(stale_fields)} last updated {oldest:%d %b} — source may have stopped",
+        )
+        priority_slot += 1
 
     targets = lookback_targets(anchor_date)
     changes: dict[str, Change] = {}
@@ -232,15 +265,12 @@ def build_snapshot(
                 # Only when the two genuinely differ. On a normal day the price and the basis
                 # share a date and this line would be noise.
                 #
-                # First in the list, ahead of the permanent caveats: a reader looking at two
-                # percentages from two different sessions needs this before anything else, and
-                # the renderer only shows the first few notes.
                 divergence = (
                     f"price {day_pct:+.2f}% on {snapshot.level.as_of:%d %b}; "
                     f"table is {basis} to {anchor_date:%d %b}"
                 )
                 if divergence not in snapshot.notes:
-                    snapshot.notes.insert(0, divergence)
+                    snapshot.notes.insert(priority_slot, divergence)
 
     if snapshot.level.known and snapshot.level.freshness is None:
         snapshot.level.freshness = FRESHNESS_PREV_CLOSE

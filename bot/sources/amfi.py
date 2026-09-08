@@ -184,10 +184,14 @@ def nav_history(
         found = 0
         mismatched = 0
         for line in lines:
-            if not line.startswith(scheme.line_prefix):
-                continue
             parts = line.split(";")
             if len(parts) < columns.width:
+                continue
+            # Match on the RESOLVED Scheme Code column rather than on a leading-byte prefix.
+            # The prefix is still used as the streaming filter above, purely to avoid holding
+            # 15MB in memory; if the code column ever moves, that filter drops everything and
+            # this fetch fails closed with "returned no NAV rows" -- loud, and never wrong.
+            if parts[columns.code].strip() != scheme.scheme_code:
                 continue
             if not any(parts[i].strip().upper() == scheme.isin.upper() for i in columns.isin_at):
                 mismatched += 1

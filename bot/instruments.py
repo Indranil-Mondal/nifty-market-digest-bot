@@ -97,6 +97,10 @@ def build_registry() -> list[Registration]:
                 notes=(
                     "index level is licensee-only; tracked via the feeder fund's NAV",
                 ),
+                # It needs an Indian business day AND a fresh US NAV, so its no-NAV dates are
+                # the union of two market calendars. Six calendar days behind is normal here;
+                # it hit six on Mon 29 Dec 2025 with nothing wrong.
+                stale_after_days=9,
             ),
             russell_tech.fetch,
         ),

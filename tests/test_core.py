@@ -26,13 +26,14 @@ from bot import notify
 from bot.compute import FetchResult, InstrumentSpec, build_snapshot, persist
 from bot.ledger import NewsLedger, SendLedger
 from bot.model import FRESHNESS_LIVE, FRESHNESS_PREV_CLOSE, Change, Digest, Reading
-from bot.sources import bse, gsr, nse
+from bot.sources import amfi, bse, gsr, nse
 from bot.state import Series, Store
 from bot.util import (
     from_iso,
     lookback_targets,
     nearest_on_or_before,
     parse_date,
+    parse_ddmmmyyyy,
     parse_float,
     pct_change,
     shift_months,
@@ -709,6 +710,90 @@ class TestStore(unittest.TestCase):
             store.save_all()
             self.assertTrue((Path(tmp) / "x.json").exists())
             self.assertIn("x: 1 points", "\n".join(store.summary()))
+
+
+class TestAmfiLayout(unittest.TestCase):
+    """AMFI reordered this report's columns on 19 Aug 2026, which froze every fund NAV in the
+    digest for three weeks. Both layouts are eight fields wide and both start with the scheme
+    code, so nothing but the header names distinguishes them -- which is why the parser reads
+    the header instead of counting fields."""
+
+    OLD = (
+        "Scheme Code;Scheme Name;ISIN Div Payout/ISIN Growth;ISIN Div Reinvestment;"
+        "Net Asset Value;Repurchase Price;Sale Price;Date"
+    )
+    NEW = (
+        "Scheme Code;NAV Name;Plan;Option;ISIN Div Payout/ISIN Growth;"
+        "ISIN Div Reinvestment;Net Asset Value;Date"
+    )
+
+    def test_layout_before_the_change(self):
+        columns = amfi.resolve_columns(self.OLD)
+        self.assertIsNotNone(columns)
+        self.assertEqual((columns.isin_growth, columns.nav, columns.date), (2, 4, 7))
+
+    def test_layout_after_the_change(self):
+        columns = amfi.resolve_columns(self.NEW)
+        self.assertIsNotNone(columns)
+        self.assertEqual((columns.isin_growth, columns.nav, columns.date), (4, 6, 7))
+
+    def test_a_field_count_check_could_not_have_caught_it(self):
+        self.assertEqual(len(self.OLD.split(";")), len(self.NEW.split(";")))
+
+    def test_unrecognised_header_is_refused_rather_than_guessed(self):
+        self.assertIsNone(amfi.resolve_columns("<html><head><title>Error</title>"))
+        self.assertIsNone(amfi.resolve_columns(""))
+        self.assertIsNone(amfi.resolve_columns("148063;Edelweiss;39.7487;04-Sep-2026"))
+
+    def test_header_without_an_isin_column_is_refused(self):
+        # Scheme codes are too dense to trust unaided: 140088 is Gold BeES and 140089 is Nifty
+        # PSU Bank BeES, so a row must prove its identity with an ISIN or not be believed.
+        self.assertIsNone(amfi.resolve_columns("Scheme Code;NAV Name;Net Asset Value;Date"))
+
+    def test_real_row_parses_under_the_current_layout(self):
+        row = (
+            "148063;Edelweiss US Technology Equity Fund of Fund- Direct Plan- Growth;"
+            "Direct Plan;Growth;INF754K01LB7;;39.7487;04-Sep-2026"
+        )
+        columns = amfi.resolve_columns(self.NEW)
+        parts = row.split(";")
+        self.assertEqual(parts[columns.isin_growth], "INF754K01LB7")
+        self.assertEqual(parse_float(parts[columns.nav]), 39.7487)
+        self.assertEqual(parse_ddmmmyyyy(parts[columns.date]), D(2026, 9, 4))
+
+    def test_isin_is_accepted_from_either_isin_column(self):
+        columns = amfi.resolve_columns(self.NEW)
+        self.assertEqual(columns.isin_at, (4, 5))
+        self.assertEqual(columns.width, 8)
+
+    def test_precise_label_wins_over_the_looser_one(self):
+        # Column lookup must be label-major. Searching fields first would match the loose "nav"
+        # against a column called "NAV" at index 1 and return a scheme name as the price.
+        header = (
+            "Scheme Code;NAV;Plan;Option;ISIN Div Payout/ISIN Growth;"
+            "ISIN Div Reinvestment;Net Asset Value;Date"
+        )
+        columns = amfi.resolve_columns(header)
+        self.assertIsNotNone(columns)
+        self.assertEqual(columns.nav, 6)
+
+    def test_empty_option_column_does_not_shift_anything(self):
+        # An adjacent double semicolon looks malformed but is just an empty Option field.
+        row = "140088;Nippon India ETF Gold BeES;Direct Plan;;INF204KB17I5;;125.3986;08-Sep-2026"
+        columns = amfi.resolve_columns(self.NEW)
+        parts = row.split(";")
+        self.assertEqual(len(parts), 8)
+        self.assertEqual(parts[columns.isin_growth], "INF204KB17I5")
+        self.assertEqual(parse_float(parts[columns.nav]), 125.3986)
+
+    def test_spacing_variants_still_resolve(self):
+        spaced = (
+            "Scheme Code ; NAV Name ; Plan ; Option ; ISIN Div Payout/ISIN Growth ; "
+            "ISIN Div Reinvestment ; Net Asset Value ; Date"
+        )
+        columns = amfi.resolve_columns(spaced)
+        self.assertIsNotNone(columns)
+        self.assertEqual((columns.isin_growth, columns.nav, columns.date), (4, 6, 7))
 
 
 if __name__ == "__main__":

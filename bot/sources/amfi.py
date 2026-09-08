@@ -4,15 +4,30 @@ AMFI publishes a per-AMC NAV report that accepts a date range and returns one se
 delimited row per scheme per day. A single request covers a full year, which is what makes the
 "NAV as it stood 12 months ago" requirement cheap.
 
-Two hazards, both measured rather than assumed:
+Three hazards, all measured rather than assumed:
 
   * An invalid `mf` code answers HTTP 200 with an HTML frameset, and a *valid but wrong* `mf`
     answers 200 with a real report for the wrong AMC. So a 200 proves nothing on its own.
   * Scheme codes are dense: 140088 is Gold BeES while 140089 is Nifty PSU Bank BeES, and
     148063 vs 148064 are the direct and regular plans of the same fund. An off-by-one guess
     returns a different fund's NAV at HTTP 200, which would render as perfectly plausible data.
+  * The column ORDER is not stable. On 19 Aug 2026 AMFI silently changed the report from
 
-Every row is therefore validated against the expected ISIN before it is believed.
+        Scheme Code;Scheme Name;ISIN Div Payout/ISIN Growth;ISIN Div Reinvestment;
+        Net Asset Value;Repurchase Price;Sale Price;Date
+
+    to
+
+        Scheme Code;NAV Name;Plan;Option;ISIN Div Payout/ISIN Growth;
+        ISIN Div Reinvestment;Net Asset Value;Date
+
+    Both are eight fields wide, so a field-count check does not notice; but ISIN moved from
+    index 2 to index 4 and NAV from 4 to 6. This module used to hard-code those positions, and
+    the change froze every fund NAV in the digest for three weeks. Columns are therefore now
+    located by HEADER NAME, and a report whose header cannot be understood is refused outright
+    rather than parsed on a guess.
+
+Every row is validated against the expected ISIN before it is believed.
 """
 
 from __future__ import annotations
@@ -34,13 +49,75 @@ HISTORY_URL = "https://portal.amfiindia.com/DownloadNAVHistoryReport_Po.aspx"
 CHUNK_DAYS = 100
 STREAM_TIMEOUT = 120
 
-# Column positions in the report. Header row:
-#   Scheme Code;Scheme Name;ISIN Div Payout/ISIN Growth;ISIN Div Reinvestment;
-#   Net Asset Value;Repurchase Price;Sale Price;Date
-_COL_ISIN = 2
-_COL_NAV = 4
-_COL_DATE = 7
-_MIN_COLS = 8
+# Header labels, lowercased and stripped, that identify each column we need. Several spellings
+# are listed per column because AMFI has used more than one and may again; the point of this
+# table is that a NEW spelling produces a loud error instead of silently wrong numbers.
+_ISIN_GROWTH_LABELS = ("isin div payout/isin growth", "isin div payout / isin growth", "isin growth")
+_ISIN_REINVEST_LABELS = ("isin div reinvestment", "isin div reinvest")
+_NAV_LABELS = ("net asset value", "nav")
+_DATE_LABELS = ("date",)
+_CODE_LABELS = ("scheme code",)
+
+
+@dataclass(frozen=True)
+class Columns:
+    """Where each field lives in this particular response."""
+
+    code: int
+    nav: int
+    date: int
+    isin_growth: Optional[int]
+    isin_reinvest: Optional[int]
+
+    @property
+    def width(self) -> int:
+        present = [self.code, self.nav, self.date, self.isin_growth, self.isin_reinvest]
+        return max(i for i in present if i is not None) + 1
+
+    @property
+    def isin_at(self) -> tuple[int, ...]:
+        """Every column that may carry the scheme's ISIN.
+
+        A growth plan puts it in the payout/growth column and leaves reinvestment blank; a
+        reinvestment plan does the reverse. Accepting either means one fewer thing to get wrong
+        per scheme, and the ISIN is still checked -- just not against a fixed column.
+        """
+        return tuple(i for i in (self.isin_growth, self.isin_reinvest) if i is not None)
+
+
+def resolve_columns(header: str) -> Optional[Columns]:
+    """Locate the columns we need from the report's own header row.
+
+    Returns None if the line is not a recognisable header, which the caller must treat as a
+    failed fetch. Guessing is what broke this module once already.
+    """
+    fields = [f.strip().lower() for f in header.split(";")]
+
+    def find(labels: tuple[str, ...]) -> Optional[int]:
+        # Label-major, not field-major. The label tuples are in priority order, so the precise
+        # "net asset value" must win over the looser "nav" wherever each happens to sit. Walking
+        # the fields in the outer loop would instead return whichever matched earliest -- and
+        # column 1 of the live header is "NAV Name", which is a scheme name, not a NAV.
+        for label in labels:
+            for index, name in enumerate(fields):
+                if name == label:
+                    return index
+        return None
+
+    code = find(_CODE_LABELS)
+    nav = find(_NAV_LABELS)
+    when = find(_DATE_LABELS)
+    if code is None or nav is None or when is None:
+        return None
+
+    growth = find(_ISIN_GROWTH_LABELS)
+    reinvest = find(_ISIN_REINVEST_LABELS)
+    if growth is None and reinvest is None:
+        # Without an ISIN anywhere we cannot prove a row belongs to the scheme we asked for,
+        # and scheme codes are too dense to trust on their own.
+        return None
+
+    return Columns(code=code, nav=nav, date=when, isin_growth=growth, isin_reinvest=reinvest)
 
 
 @dataclass(frozen=True)
@@ -90,9 +167,17 @@ def nav_history(
             window_start = window_end + dt.timedelta(days=1)
             continue
 
-        head = "\n".join(lines[:3]).lower()
-        if "<html" in head or "scheme code" not in head:
-            errors.append(f"AMFI returned a page rather than a report ({window_label})")
+        # stream_lines always keeps the first three lines regardless of the prefix filter, so
+        # the header survives even though we asked for one scheme's rows only.
+        columns = None
+        for candidate in lines[:3]:
+            columns = resolve_columns(candidate)
+            if columns is not None:
+                break
+
+        if columns is None:
+            head = " | ".join(line[:90] for line in lines[:2]) or "(empty response)"
+            errors.append(f"AMFI report layout not recognised ({window_label}); header was: {head}")
             window_start = window_end + dt.timedelta(days=1)
             continue
 
@@ -102,22 +187,31 @@ def nav_history(
             if not line.startswith(scheme.line_prefix):
                 continue
             parts = line.split(";")
-            if len(parts) < _MIN_COLS:
+            if len(parts) < columns.width:
                 continue
-            if parts[_COL_ISIN].strip().upper() != scheme.isin.upper():
+            if not any(parts[i].strip().upper() == scheme.isin.upper() for i in columns.isin_at):
                 mismatched += 1
                 continue
-            nav = parse_float(parts[_COL_NAV])
-            when = parse_ddmmmyyyy(parts[_COL_DATE])
+            nav = parse_float(parts[columns.nav])
+            when = parse_ddmmmyyyy(parts[columns.date])
             if nav is None or when is None:
                 continue
             out[when] = {field: nav}
             found += 1
 
-        if mismatched:
-            # Right scheme code, wrong ISIN: either the report changed shape or the code has been
-            # reassigned. Either way the data is not ours.
-            errors.append(f"AMFI ISIN mismatch on {mismatched} row(s) for {scheme.scheme_code}")
+        if mismatched and not found:
+            # Right scheme code, wrong ISIN on every row: either the code has been reassigned to
+            # another fund or the report changed shape in a way resolve_columns did not catch.
+            # Either way the data is not ours and must not be believed.
+            errors.append(
+                f"AMFI: scheme {scheme.scheme_code} returned {mismatched} row(s), none carrying "
+                f"ISIN {scheme.isin} ({window_label})"
+            )
+        elif mismatched:
+            log.warning(
+                "AMFI: %s row(s) for %s did not carry ISIN %s in %s",
+                mismatched, scheme.scheme_code, scheme.isin, window_label,
+            )
         if found == 0 and not mismatched:
             # A window with genuinely no NAV rows is normal for a short holiday span, so only
             # complain when the whole requested range came back empty.

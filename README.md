@@ -2,8 +2,8 @@
 
 Nifty 50, Nifty Next 50, Nifty Midcap 150 TRI, Nifty Smallcap 250 TRI, BSE 250 SmallCap TRI,
 the Nippon Gold ETF, the Zerodha Silver ETF and the Russell 1000 Equal Weight Technology sleeve —
-daily updates with PE, NAV/iNAV and historical comparisons, plus the gold:silver ratio, delivered
-straight to Telegram.
+daily updates with PE, NAV/iNAV and historical comparisons, plus the gold:silver ratio and India
+VIX, delivered straight to Telegram.
 
 Arrives at 11:11 IST on GitHub Actions. No server, no API keys, no paid data, nothing to
 maintain on a normal week.
@@ -18,17 +18,37 @@ a gap rather than approximated — see [Honest gaps](#honest-gaps).
 
 Per instrument: current level or price, NAV and iNAV where those exist, the day's move, and the
 move over 1/2/3/4 weeks and 3/6/12 months — each with the PE **as it stood on that past date**.
-Then a filtered news and policy section.
+Then where today's numbers sit inside the instrument's *own* trailing year, and a filtered news
+and policy section.
+
+That last part is the only thing here that resembles a judgement, so it is phrased as a
+measurement. The digest never says "expensive"; it says the PE is at percentile 84 of the range
+this index has actually traded in, and lets you decide. On 9 Sep 2026 that pair of lines said
+something no single figure in the digest could:
+
+| | PE percentile | off its 1Y high |
+|---|---:|---:|
+| Nifty Smallcap 250 | 84 | at the high |
+| Nifty Next 50 | 32 | −2.4% |
+| Nifty Midcap 150 | 6 | −1.9% |
+| Nifty 50 | 3 | −10.2% |
+
+Large caps cheap and beaten down, small caps expensive and at their highs — from data the bot
+was already storing.
 
 <p align="center">
-  <img src="docs/sample-digest.png" alt="Sample morning digest showing Nifty Smallcap 250 TRI, the Zerodha Silver ETF and the gold:silver ratio" width="640">
+  <img src="docs/sample-digest.png" alt="Sample morning digest showing Nifty Smallcap 250 TRI, Nifty 50, the Zerodha Silver ETF and India VIX" width="640">
 </p>
 
 <p align="center">
-  <sub>Three of the nine blocks, rendered from real output by
+  <sub>Four of the ten blocks, rendered from real output by
   <a href="scripts/render_sample.py"><code>scripts/render_sample.py</code></a>. The rupee sign and
   flag emoji are substituted in this image only — the Telegram message shows them correctly.</sub>
 </p>
+
+These four are here because they have visibly different shapes: a PE column, the same block at the
+opposite end of its valuation range, a NAV/iNAV pair with a currency line, and a mean-reverting
+gauge that reports a percentile instead of a distance from its high.
 
 Every figure above came out of the live sources; nothing here is illustrative. Note what the
 labels are doing:
@@ -58,6 +78,7 @@ labels are doing:
 | Gold : Silver ratio | ✅ | n/a | n/a | n/a | n/a | n/a | ✅ |
 | Nifty 50 | ✅ | ✅ | n/a | n/a | ✅ | ✅ | ✅ |
 | Nifty Next 50 | ✅ | ✅ | n/a | n/a | ✅ | ✅ | ✅ |
+| India VIX | ✅ | n/a | n/a | n/a | n/a | n/a | ✅ |
 
 `n/a` means the concept does not apply — an index has no NAV, gold has no earnings and therefore
 no PE. `❌` means it exists but is not obtainable free.
@@ -277,6 +298,28 @@ Zero, and it stays zero.
 These are the things the brief asked for that cannot be had for free. Each was chased to a
 primary source before being written off.
 
+**A PE percentile for BSE 250 SmallCap.** Every other equity block reports where its PE sits in
+its own trailing year; this one does not, and the reason is a deliberate trade rather than a
+missing source. BSE publishes valuation in one static CSV *per trading date*, so a year of PE
+history costs about 250 requests, where NSE returns the whole series in one call. The bot fetches
+only the nine dates the lookback table needs, which is far too few observations to call anything
+a percentile — so it declines to print one. The PE itself, and PE at each lookback date, are
+both there.
+
+**India VIX from NSE itself.** NSE computes and publishes it, but the only programmatic route is
+`nseindia.com`, the one host this project refuses to depend on (Akamai Bot Manager, and cloud IPs
+are the documented block). It is also *not* in the LiveIndicesWatch file that serves the other
+NIFTY blocks — that file carries 131 indices and VIX is not among them, which was checked rather
+than assumed. So VIX comes from Yahoo's `^INDIAVIX`, treated like every other Yahoo dependency
+here: bounded by a plausibility band and allowed to degrade to nothing.
+
+**A decomposition of the currency effect.** The Russell sleeve and both metal ETFs are rupee
+wrappers around dollar-denominated assets, and the rupee moved 7.5% over the year — a large slice
+of what those blocks report as performance. Splitting return into asset and currency properly
+needs each fund's own FX-hedging policy, which none of them publishes machine-readably. So the
+digest shows USD/INR and its one-year move on those three blocks and leaves the arithmetic to the
+reader, rather than inventing an attribution.
+
 **PE for Russell 1000 EW Tech — impossible, not merely hard.** FTSE Russell's own factsheet for
 this index prints no P/E at all; it carries only constituent count, dividend yield and weight
 statistics. No ETF tracks the index either, so there is no issuer publishing a portfolio P/E.
@@ -414,7 +457,7 @@ python -m venv .venv
 .venv/Scripts/python -m scripts.smoke               # fetch everything, print the digest
 .venv/Scripts/python -m scripts.diagnose            # reachability table for every source
 .venv/Scripts/python -m scripts.news_check          # probe feeds, show what scoring picks
-.venv/Scripts/python -m unittest discover -s tests  # 115 tests, no network
+.venv/Scripts/python -m unittest discover -s tests  # 136 tests, no network
 .venv/Scripts/python scripts/render_sample.py       # regenerate the README screenshot
 ```
 
@@ -449,6 +492,7 @@ bot/
   format.py        Telegram HTML rendering
   news.py          RSS parsing and rule-based relevance scoring
   state.py         the incremental history cache
+  stats.py         where a number sits in its own trailing range (percentile, 52-week)
   http.py          retries, header handling, streaming
   model.py         Reading / Change / Snapshot — None means unknown, never 0
   util.py          IST clock, calendar maths, tolerant number parsing
@@ -461,6 +505,8 @@ bot/
     silver.py      Zerodha Silver ETF
     russell_tech.py  Edelweiss US Technology FoF
     gsr.py         gold:silver ratio
+    vix.py         India VIX
+    fx.py          USD/INR, shared by the three currency-exposed blocks
     yahoo.py       small chart client, used only where exchanges publish nothing
 data/history/      committed daily; the cache that makes lookbacks cheap
 scripts/

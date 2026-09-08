@@ -19,7 +19,7 @@ from typing import Callable
 
 from .compute import FetchResult, InstrumentSpec
 from .http import Http
-from .sources import bse, gold, gsr, nse, russell_tech, silver
+from .sources import bse, fx, gold, gsr, nse, russell_tech, silver, vix
 from .state import Series
 
 Fetcher = Callable[[Http, Series, InstrumentSpec, dt.date], FetchResult]
@@ -39,9 +39,24 @@ TRI_EOD_NOTE = "TRI and PE publish after close, so both are as of the last compl
 def build_registry() -> list[Registration]:
     # One shared LiveIndicesWatch fetch serves every NIFTY instrument.
     live = nse.LiveWatch()
+    # One shared USD/INR fetch serves every currency-exposed instrument.
+    rupee = fx.UsdInr()
 
     def nifty(index: nse.NiftyIndex) -> Fetcher:
         return partial(nse.fetch, index=index, live=live)
+
+    def with_fx(fetcher: Fetcher) -> Fetcher:
+        """Attach the day's USD/INR to an instrument priced in rupees but driven in dollars.
+
+        Wrapped here rather than plumbed through each source, so the registry stays the one place
+        that answers "which blocks show the rupee, and why" -- and so a source module keeps
+        knowing only about its own upstream.
+        """
+        def wrapped(http: Http, series: Series, spec: InstrumentSpec, today: dt.date) -> FetchResult:
+            result = fetcher(http, series, spec, today)
+            result.fx = rupee.rate(http)
+            return result
+        return wrapped
 
     return [
         Registration(
@@ -102,7 +117,7 @@ def build_registry() -> list[Registration]:
                 # it hit six on Mon 29 Dec 2025 with nothing wrong.
                 stale_after_days=9,
             ),
-            russell_tech.fetch,
+            with_fx(russell_tech.fetch),
         ),
         Registration(
             InstrumentSpec(
@@ -118,7 +133,7 @@ def build_registry() -> list[Registration]:
                     'benchmark "domestic price of gold" is an internal AMC formula, not a published index',
                 ),
             ),
-            gold.fetch,
+            with_fx(gold.fetch),
         ),
         Registration(
             InstrumentSpec(
@@ -133,7 +148,7 @@ def build_registry() -> list[Registration]:
                     "physically backed; one unit is about a tenth of a gram of silver",
                 ),
             ),
-            silver.fetch,
+            with_fx(silver.fetch),
         ),
         Registration(
             InstrumentSpec(
@@ -143,6 +158,10 @@ def build_registry() -> list[Registration]:
                 basis="level",
                 basis_label="ratio",
                 has_pe=False,
+                # This block computes and prints its own percentile inside gsr.py, including the
+                # long-run reference band and the domestic IBJA cross-check. A second, plainer
+                # position line underneath would say the same thing worse.
+                lead_range="none",
                 notes=("COMEX futures, USD/oz both legs — a relative-value gauge, not advice",),
             ),
             gsr.fetch,
@@ -166,5 +185,24 @@ def build_registry() -> list[Registration]:
                 has_pe=True,
             ),
             nifty(nse.NIFTY_NEXT_50),
+        ),
+        Registration(
+            InstrumentSpec(
+                key="india_vix",
+                display="INDIA VIX",
+                kind="index",
+                basis="level",
+                basis_label="index",
+                # A volatility index has no earnings and therefore no PE, in the same way gold
+                # does not -- an absence in the instrument, not a gap in coverage.
+                has_pe=False,
+                # VIX mean-reverts, so a percentile is the reading that means something. The
+                # default "60% off the 1Y high" phrasing would be arithmetically true and read
+                # as a loss, when what it actually describes is an unusually calm market.
+                lead_range="percentile",
+                notes=("expected 30-day Nifty volatility, annualised — a gauge of "
+                       "nervousness, not direction",),
+            ),
+            vix.fetch,
         ),
     ]

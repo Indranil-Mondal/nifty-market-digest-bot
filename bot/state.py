@@ -150,6 +150,23 @@ class Series:
                 out.append(parsed)
         return sorted(out)
 
+    def points(self, field: str) -> list[tuple[dt.date, float]]:
+        """Every (date, value) pair this series holds for `field`, oldest first.
+
+        dates_with answers "which dates" and as_of answers "the one nearest a target"; a
+        distribution needs the whole series, and building it by calling as_of once per date with
+        the slack turned off works but reads like a puzzle.
+        """
+        out: list[tuple[dt.date, float]] = []
+        for text, record in self._series.items():
+            value = record.get(field)
+            if not isinstance(value, (int, float)):
+                continue
+            parsed = from_iso(text)
+            if parsed is not None:
+                out.append((parsed, float(value)))
+        return sorted(out)
+
     def as_of(self, target: dt.date, field: str, *, max_slack_days: int = 12) -> tuple[Optional[float], Optional[dt.date]]:
         """Value of `field` on the latest available date <= `target`.
 

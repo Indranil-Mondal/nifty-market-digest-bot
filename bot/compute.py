@@ -28,10 +28,12 @@ from .model import (
     FRESHNESS_PREV_CLOSE,
     FRESHNESS_STALE,
     Change,
+    FxRate,
     Reading,
     Snapshot,
 )
 from .state import Series
+from .stats import range_position, trailing_window
 from .util import LOOKBACKS, lookback_targets, pct_change
 
 log = logging.getLogger(__name__)
@@ -61,6 +63,13 @@ class InstrumentSpec:
     # source has stopped. Six covers any weekend-plus-holiday run for a daily series; an
     # overseas fund of fund needs longer because it loses two market calendars, not one.
     stale_after_days: int = STALE_AFTER_DAYS
+    # How to express where the headline number sits in its own trailing year:
+    #   "distance"   -- x% off the high, y% above the low. Right for anything that trends, which
+    #                   is every price and NAV here.
+    #   "percentile" -- position within the distribution. Right for a mean-reverting series, where
+    #                   "60% off the high" reads like a loss when it actually means "calm".
+    #   "none"       -- the instrument already reports its own position in a note.
+    lead_range: str = "distance"
 
 
 @dataclass
@@ -75,6 +84,10 @@ class FetchResult:
     history: dict[dt.date, dict[str, float]] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Set only for the instruments whose returns are partly a currency move. Kept off `readings`
+    # on purpose: readings are persisted into THIS instrument's history, and the rupee rate is
+    # not a fact about gold.
+    fx: Optional[FxRate] = None
 
     def add(self, name: str, value: Optional[float], *, as_of: Optional[dt.date] = None,
             freshness: Optional[str] = None, source: Optional[str] = None) -> None:
@@ -134,7 +147,8 @@ def build_snapshot(
     result: FetchResult,
     today: dt.date,
 ) -> Snapshot:
-    snapshot = Snapshot(key=spec.key, display=spec.display, kind=spec.kind)
+    snapshot = Snapshot(key=spec.key, display=spec.display, kind=spec.kind,
+                        lead_range=spec.lead_range)
 
     for name in ("level", "tri", "nav", "inav", "pe", "pb", "div_yield"):
         reading = result.readings.get(name)
@@ -294,4 +308,34 @@ def build_snapshot(
     if snapshot.level.known and snapshot.level.freshness is None:
         snapshot.level.freshness = FRESHNESS_PREV_CLOSE
 
+    snapshot.fx = result.fx
+    _locate_in_range(snapshot, series, anchor_date)
+
     return snapshot
+
+
+def _locate_in_range(snapshot: Snapshot, series: Series, anchor: dt.date) -> None:
+    """Where the headline number and the PE sit inside their own trailing year.
+
+    This is the one thing the digest can say about "expensive" or "beaten down" without asserting
+    a threshold it cannot defend. It is measured entirely from history already on disk, so it adds
+    no request, no new upstream to break, and no new way to be wrong about a number -- the range
+    is either computable from the stored series or it is omitted.
+
+    Both windows are trailing 365 days from the table's own anchor date, not from today, for the
+    same reason the lookback table is: at 11:11 the newest close is yesterday's, and measuring a
+    year from today would quietly include one fewer session at the far end.
+    """
+    lead_reading, lead_field = snapshot.lead
+    if lead_reading.known:
+        values, first, last = trailing_window(series.points(lead_field), anchor)
+        # The live intraday level is not in the stored series, so it is compared against the
+        # window rather than being part of it -- which is correct: "off its 52-week high" should
+        # measure today's price against the closes behind it.
+        snapshot.lead_position = range_position(
+            lead_reading.value, values, first=first, last=last,
+        )
+
+    if snapshot.pe.known:
+        values, first, last = trailing_window(series.points("pe"), anchor)
+        snapshot.pe_position = range_position(snapshot.pe.value, values, first=first, last=last)

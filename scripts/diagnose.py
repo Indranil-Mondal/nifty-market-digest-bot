@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot.http import Http                                            # noqa: E402
 from bot.sources import amfi, bse, bse_etf, gold, gsr, nse           # noqa: E402
-from bot.sources import russell_tech, silver                         # noqa: E402
+from bot.sources import fx, russell_tech, silver, vix                 # noqa: E402
 from bot.sources.amfi import HISTORY_URL                             # noqa: E402
 from bot.util import fmt_ddmmmyyyy, ist_today                        # noqa: E402
 
@@ -167,6 +167,29 @@ def main() -> int:
 
     check("Yahoo metals GC=F/SI=F", CRITICAL, "query1.finance.yahoo.com", metals)
     check("IBJA 999 rates", OPTIONAL, "www.ibjarates.com", ibja)
+
+    # --- India VIX and the rupee --------------------------------------------------------
+    # Both OPTIONAL: each drives one block or one line, and neither can take the digest down.
+    # The band check is the point of testing them here at all -- a reused or delisted Yahoo
+    # ticker answers 200 with a real-looking number, so "reachable" is not the question.
+    def india_vix():
+        closes = vix.yahoo.series(http, vix.SYMBOL, range_="1mo")
+        if not closes:
+            return False, "no series"
+        newest = max(closes)
+        value = closes[newest]
+        inside = vix.PLAUSIBLE[0] <= value <= vix.PLAUSIBLE[1]
+        return inside, f"{value:.2f} on {newest} ({len(closes)}pts)" + ("" if inside else " OUT OF BAND")
+
+    def usd_inr():
+        rate = fx.UsdInr().rate(http)
+        if rate is None:
+            return False, "unavailable or outside the plausible band"
+        move = f", {rate.pct_1y:+.1f}% 1Y" if rate.pct_1y is not None else ""
+        return True, f"{rate.rate:.3f} on {rate.as_of}{move}"
+
+    check("Yahoo ^INDIAVIX", OPTIONAL, "query1.finance.yahoo.com", india_vix)
+    check("Yahoo USDINR=X", OPTIONAL, "query1.finance.yahoo.com", usd_inr)
 
     # --- misc ---------------------------------------------------------------------------
     def amfi_raw():

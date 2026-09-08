@@ -64,6 +64,12 @@ SUBSTITUTIONS = {
 }
 
 TAG = re.compile(r"</?(b|i|code|pre|a)(?:\s[^>]*)?>")
+
+# Telegram wraps long lines on a phone; this renderer sizes the card to its widest line, so
+# without wrapping a single verbose caveat stretches the whole image (one 105-character note took
+# it from 852px to 1101px). Notes are wrapped to roughly the width of the widest table line so
+# the result looks like the message does rather than like a desktop terminal.
+WRAP_COLS = 66
 BLOCK_SPLIT = "\u2501" * 17          # format.RULE
 
 
@@ -204,8 +210,10 @@ def render(digest_html: str, wanted: list[str], out: Path) -> None:
         items.append(("gap", None))
         items.append(("rule", None))
         for raw in block.splitlines():
-            if raw.strip():
-                items.append(("line", parse_line(substitute(raw))))
+            if not raw.strip():
+                continue
+            for runs in _wrap_runs(parse_line(substitute(raw))):
+                items.append(("line", runs))
     if rest:
         items.append(("gap", None))
         items.append(("rule", None))
@@ -275,6 +283,29 @@ def render(digest_html: str, wanted: list[str], out: Path) -> None:
     print(f"wrote {out} ({image.width}x{image.height})")
     print("blocks shown:", ", ".join(wanted))
     print("blocks named in the footer:", ", ".join(rest))
+
+
+def _wrap_runs(runs: list[Run]) -> list[list[Run]]:
+    """Wrap a single-style line that is too long, leaving mixed-style lines alone.
+
+    Only uniform lines are wrapped, which in practice means the italic caveats -- the headline
+    mixes code, bold and italic on one line and is short anyway, and a <pre> table must never be
+    re-flowed.
+    """
+    if len(runs) != 1 or len(runs[0].text) <= WRAP_COLS:
+        return [runs]
+    run = runs[0]
+    out: list[list[Run]] = []
+    current = ""
+    for word in run.text.split(" "):
+        if current and len(current) + 1 + len(word) > WRAP_COLS:
+            out.append([Run(current, run.style, run.color)])
+            current = "  " + word
+        else:
+            current = f"{current} {word}" if current else word
+    if current:
+        out.append([Run(current, run.style, run.color)])
+    return out
 
 
 def _wrap_tail(names: list[str], width: int) -> list[str]:

@@ -38,6 +38,7 @@ from ..compute import FetchResult, InstrumentSpec
 from ..http import Http
 from ..model import FRESHNESS_LIVE, FRESHNESS_PREV_CLOSE
 from ..state import Series
+from ..stats import range_position
 from ..util import parse_float
 from . import yahoo
 
@@ -109,16 +110,19 @@ def _position_in_range(current: float, history: list[float]) -> Optional[str]:
     Preferred over fixed thresholds because it is computed from the data in hand rather than a
     number someone remembers from a different decade. `history` must already be trimmed to the
     trailing year, so the label and the arithmetic agree.
+
+    The arithmetic itself now lives in bot.stats, which the index PE and 52-week-range lines also
+    use; the wording is kept here because this block's phrasing predates them and is in the
+    README. Worded without an ordinal suffix on purpose: appending a literal "th" produces "1th",
+    "21th", "23th".
     """
-    if len(history) < 30:
+    position = range_position(current, history)
+    if position is None:
         return None
-    low, high = min(history), max(history)
-    if high <= low:
-        return None
-    percentile = sum(1 for value in history if value <= current) / len(history) * 100.0
-    # Worded without an ordinal suffix on purpose: appending a literal "th" produces "1th",
-    # "21th", "23th". Not worth an ordinal helper for one label.
-    return f"percentile {percentile:.0f} of 1Y range {low:.1f}–{high:.1f}"
+    return (
+        f"percentile {position.percentile:.0f} of 1Y range "
+        f"{position.low:.1f}–{position.high:.1f}"
+    )
 
 
 def _reading(ratio: float) -> str:

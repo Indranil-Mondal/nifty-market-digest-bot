@@ -122,14 +122,12 @@ def _headline(snapshot: Snapshot, generated_at: dt.datetime) -> list[str]:
     """The two or three lines above the table."""
     out: list[str] = []
 
-    # Pick the number that leads. For a tradeable ETF the market price leads; for an index the
-    # level leads; for a fund with no listed price the NAV leads.
-    if snapshot.level.known:
-        lead, lead_name = snapshot.level, "Price" if snapshot.kind == "etf" else "Level"
-    elif snapshot.tri.known:
-        lead, lead_name = snapshot.tri, "TRI"
-    else:
-        lead, lead_name = snapshot.nav, "NAV"
+    # Which number leads is decided in one place (Snapshot.lead) because compute measures the
+    # 52-week range on the same field; two copies of the rule would eventually disagree and the
+    # block would describe a number other than the one printed.
+    lead, lead_field = snapshot.lead
+    lead_name = {"level": "Price" if snapshot.kind == "etf" else "Level",
+                 "tri": "TRI", "nav": "NAV"}[lead_field]
 
     day = snapshot.changes.get("1D")
     # When the table runs on some other series -- a fund NAV, a total-return index -- that
@@ -174,6 +172,59 @@ def _headline(snapshot: Snapshot, generated_at: dt.datetime) -> list[str]:
     return out
 
 
+def _range_window(position) -> str:
+    """"1Y" only when the window really is a year; otherwise say how much history there is."""
+    if position.spans_a_year:
+        return "1Y"
+    if position.first and position.last:
+        months = max(1, round((position.last - position.first).days / 30.4))
+        return f"{months}M"
+    return f"{position.count}d"
+
+
+def _context(snapshot: Snapshot) -> list[str]:
+    """Where today's numbers sit in their own recent history, and the rupee where it matters.
+
+    Deliberately below the table rather than beside the headline: these answer "is this high or
+    low *for this instrument*", which is a second question, and crowding it into the first line
+    would make the one number a reader must not misread harder to find.
+
+    Percentile is stated without an ordinal suffix -- "percentile 83", not "83rd" -- for the same
+    reason gsr.py does: a literal "th" produces "1th" and "23th", and an ordinal helper is not
+    worth writing for one label.
+    """
+    out: list[str] = []
+
+    position = snapshot.pe_position
+    if position is not None:
+        window = _range_window(position)
+        out.append(
+            f"PE at percentile {position.percentile:.0f} of {window} range "
+            f"{position.low:.1f}–{position.high:.1f}"
+        )
+
+    position = snapshot.lead_position
+    if position is not None and snapshot.lead_range != "none":
+        window = _range_window(position)
+        if snapshot.lead_range == "percentile":
+            out.append(
+                f"percentile {position.percentile:.0f} of {window} range "
+                f"{position.low:.1f}–{position.high:.1f}"
+            )
+        else:
+            # "0.0% off" would be pedantically true at a new high and read as a rounding
+            # artefact, so the high itself is called what it is.
+            off = position.off_high_pct
+            high = "at its" if off > -0.05 else f"{abs(off):.1f}% off the"
+            out.append(f"{high} {window} high · {position.above_low_pct:+.1f}% above the low")
+
+    if snapshot.fx is not None:
+        move = f" · {snapshot.fx.pct_1y:+.1f}% 1Y" if snapshot.fx.pct_1y is not None else ""
+        out.append(f"USD/INR {snapshot.fx.rate:.2f}{move}")
+
+    return [f"<i>{esc(line)}</i>" for line in out]
+
+
 def render_snapshot(snapshot: Snapshot, generated_at: dt.datetime) -> str:
     parts = [RULE, f"<b>{esc(snapshot.display)}</b>"]
 
@@ -184,6 +235,7 @@ def render_snapshot(snapshot: Snapshot, generated_at: dt.datetime) -> str:
 
     parts.extend(_headline(snapshot, generated_at))
     parts.append(f"<pre>{esc(_table(snapshot))}</pre>")
+    parts.extend(_context(snapshot))
 
     if snapshot.change_basis != "level":
         parts.append(f"<i>moves on {esc(snapshot.change_basis)}</i>")
@@ -238,7 +290,11 @@ def render(digest: Digest) -> str:
     legend = (
         f"<i>{DASH} = not published / not applicable. "
         "~ = base date drifted past the calendar target. "
-        "PE column is PE as it stood on that past date.</i>"
+        "PE column is PE as it stood on that past date. "
+        # Worth one clause: a headline saying "smallcaps 1% below their record" is quoting an
+        # intraday extreme, and this digest holds closes only, so the two figures will differ
+        # slightly and the difference is not an error in either.
+        "Ranges and percentiles are computed on daily closes, not intraday highs and lows.</i>"
     )
     tail.append(legend)
 

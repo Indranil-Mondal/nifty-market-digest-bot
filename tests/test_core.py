@@ -32,11 +32,13 @@ from bot.model import (
     FRESHNESS_T1,
     Change,
     Digest,
+    FxRate,
     Reading,
     Snapshot,
 )
-from bot.sources import amfi, bse, gsr, nse
+from bot.sources import amfi, bse, fx as fx_src, gsr, nse, vix
 from bot.state import Series, Store
+from bot.stats import range_position, trailing_window
 from bot.util import (
     from_iso,
     lookback_targets,
@@ -1074,6 +1076,170 @@ class TestNoteBudget(unittest.TestCase):
         rendered = self._render(ordinary)
         for note in ordinary:
             self.assertIn(note, rendered)
+
+
+class TestRangePosition(unittest.TestCase):
+    """The arithmetic behind "expensive for this instrument" and "off its high".
+
+    These numbers get read as judgements, so the failure to avoid is answering at all when the
+    data cannot support an answer -- a percentile over eleven observations, or over a window
+    where nothing moved, looks exactly as authoritative as a real one.
+    """
+
+    def test_too_few_observations_answers_nothing(self):
+        self.assertIsNone(range_position(50.0, [float(v) for v in range(29)]))
+        self.assertIsNotNone(range_position(50.0, [float(v) for v in range(30)]))
+
+    def test_a_flat_window_answers_nothing(self):
+        # Every observation identical: a percentile here is meaningless, not 100.
+        self.assertIsNone(range_position(20.0, [20.0] * 200))
+
+    def test_percentile_counts_observations_at_or_below(self):
+        position = range_position(75.0, [float(v) for v in range(1, 101)])
+        self.assertEqual(position.percentile, 75.0)
+        self.assertEqual((position.low, position.high), (1.0, 100.0))
+
+    def test_distance_from_the_extremes(self):
+        position = range_position(90.0, [float(v) for v in range(50, 151)])
+        self.assertAlmostEqual(position.off_high_pct, (90 - 150) / 150 * 100, places=6)
+        self.assertAlmostEqual(position.above_low_pct, (90 - 50) / 50 * 100, places=6)
+
+    def test_a_value_outside_the_window_is_still_located(self):
+        # Today's live price can be above every stored close -- that is what a new high IS.
+        position = range_position(160.0, [float(v) for v in range(50, 151)])
+        self.assertEqual(position.percentile, 100.0)
+        self.assertGreater(position.off_high_pct, 0)
+
+    def test_the_window_reports_its_real_span_not_the_one_requested(self):
+        # A series that only goes back four months must not be labelled 1Y.
+        points = [(D(2026, 5, 1) + dt.timedelta(days=i), 100.0 + i) for i in range(120)]
+        values, first, last = trailing_window(points, D(2026, 9, 9))
+        self.assertEqual((first, last), (D(2026, 5, 1), D(2026, 8, 28)))
+        self.assertFalse(range_position(150.0, values).spans_a_year)
+
+    def test_the_window_excludes_anything_after_the_anchor(self):
+        points = [(D(2026, 9, 8), 1.0), (D(2026, 9, 30), 2.0)]
+        values, _first, last = trailing_window(points, D(2026, 9, 9))
+        self.assertEqual(values, [1.0])
+        self.assertEqual(last, D(2026, 9, 8))
+
+
+class TestContextLines(unittest.TestCase):
+    """The three ways a block can express where its headline sits, and when it says nothing."""
+
+    def _year(self, values):
+        """A full year of dated observations, so the window is honestly labelled 1Y.
+
+        Built through trailing_window rather than handed to range_position bare: an undated
+        window reports its own point count instead ("101d"), which is correct behaviour and not
+        what these tests are about.
+        """
+        points = [(D(2025, 9, 10) + dt.timedelta(days=i), v) for i, v in enumerate(values)]
+        window, first, last = trailing_window(points, D(2026, 9, 9))
+        return window, first, last
+
+    def _snapshot(self, lead_range, *, values=None, fx=None):
+        snap = Snapshot(key="k", display="K", lead_range=lead_range)
+        snap.level = Reading(value=90.0, as_of=D(2026, 9, 8), freshness=FRESHNESS_PREV_CLOSE)
+        snap.changes = {"1D": Change(label="1D", pct=0.1)}
+        values = values if values is not None else [float(v % 101 + 50) for v in range(300)]
+        window, first, last = self._year(values)
+        snap.lead_position = range_position(90.0, window, first=first, last=last)
+        snap.fx = fx
+        return snap
+
+    def test_distance_is_the_default_framing(self):
+        line = " ".join(fmt._context(self._snapshot("distance")))
+        self.assertIn("40.0% off the 1Y high", line)
+        self.assertIn("+80.0% above the low", line)
+
+    def test_a_new_high_is_named_rather_than_shown_as_zero(self):
+        # "0.0% off the high" reads as a rounding artefact; at the high, say so.
+        snap = self._snapshot("distance", values=[float(v % 90 + 1) for v in range(300)])
+        self.assertIn("at its 1Y high", " ".join(fmt._context(snap)))
+
+    def test_percentile_framing_for_a_mean_reverting_series(self):
+        line = " ".join(fmt._context(self._snapshot("percentile")))
+        self.assertIn("percentile", line)
+        self.assertNotIn("off the", line)
+
+    def test_none_framing_stays_silent(self):
+        self.assertEqual(fmt._context(self._snapshot("none")), [])
+
+    def test_a_short_window_is_not_called_a_year(self):
+        snap = Snapshot(key="k", display="K")
+        snap.level = Reading(value=90.0, as_of=D(2026, 9, 8))
+        points = [(D(2026, 5, 1) + dt.timedelta(days=i), 50.0 + i) for i in range(120)]
+        values, first, last = trailing_window(points, D(2026, 9, 9))
+        snap.lead_position = range_position(90.0, values, first=first, last=last)
+        line = " ".join(fmt._context(snap))
+        self.assertIn("4M", line)
+        self.assertNotIn("1Y", line)
+
+    def test_the_rupee_line_appears_only_where_it_was_attached(self):
+        rate = FxRate(rate=94.81, as_of=D(2026, 9, 8), pct_1y=7.51)
+        self.assertIn("USD/INR 94.81", " ".join(fmt._context(self._snapshot("distance", fx=rate))))
+        self.assertNotIn("USD/INR", " ".join(fmt._context(self._snapshot("distance"))))
+
+    def test_the_rupee_line_omits_a_move_it_could_not_measure(self):
+        rate = FxRate(rate=94.81, as_of=D(2026, 9, 8), pct_1y=None)
+        line = " ".join(fmt._context(self._snapshot("distance", fx=rate)))
+        self.assertIn("USD/INR 94.81", line)
+        self.assertNotIn("1Y", line.split("USD/INR")[1])
+
+
+class TestPlausibilityBands(unittest.TestCase):
+    """Both new sources are Yahoo symbols, so both must refuse a number that is not theirs.
+
+    A delisted or reused ticker answers HTTP 200 with a real-looking figure -- the documented
+    hazard in yahoo.py -- and a volatility gauge printing 300, or a rupee rate printing 9.4,
+    would be read at face value.
+    """
+
+    def test_india_vix_band_brackets_every_real_reading(self):
+        low, high = vix.PLAUSIBLE
+        self.assertLess(low, 8.5)        # the calmest close on record
+        self.assertGreater(high, 87.0)   # the March 2020 spike
+        self.assertTrue(low <= 11.16 <= high)
+
+    def test_a_decimal_shift_in_vix_falls_outside_the_band(self):
+        low, high = vix.PLAUSIBLE
+        self.assertFalse(low <= 1.116 <= high)
+        self.assertFalse(low <= 1116.0 <= high)
+
+    def test_the_rupee_band_rejects_the_inverted_pair(self):
+        low, high = fx_src.PLAUSIBLE
+        self.assertTrue(low <= 94.81 <= high)
+        # INR/USD instead of USD/INR is the mistake that would still look like a rate.
+        self.assertFalse(low <= 1 / 94.81 <= high)
+
+
+class TestLeadIsSingleSourced(unittest.TestCase):
+    """compute measures the 52-week range on whatever format prints. One rule, one place."""
+
+    def test_an_etf_leads_on_price(self):
+        snap = Snapshot(key="k", display="K", kind="etf")
+        snap.level = Reading(value=23.46)
+        snap.nav = Reading(value=23.32)
+        self.assertEqual(snap.lead[1], "level")
+
+    def test_a_fund_with_no_price_leads_on_nav(self):
+        snap = Snapshot(key="k", display="K", kind="fund")
+        snap.nav = Reading(value=39.75)
+        self.assertEqual(snap.lead[1], "nav")
+
+    def test_tri_leads_when_there_is_no_level(self):
+        snap = Snapshot(key="k", display="K")
+        snap.tri = Reading(value=23661.28)
+        self.assertEqual(snap.lead[1], "tri")
+
+    def test_the_renderer_agrees_with_the_model(self):
+        for kind, field, value in (("etf", "level", 23.46), ("fund", "nav", 39.75)):
+            snap = Snapshot(key="k", display="K", kind=kind)
+            setattr(snap, field, Reading(value=value, as_of=D(2026, 9, 8)))
+            snap.changes = {"1D": Change(label="1D", pct=0.5)}
+            head = fmt._headline(snap, dt.datetime(2026, 9, 9, 11, 11))[0]
+            self.assertIn(f"{value:,.2f}", head)
 
 
 if __name__ == "__main__":

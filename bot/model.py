@@ -14,6 +14,8 @@ import datetime as dt
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .stats import RangePosition
+
 # How a headline number relates to the moment the digest is sent. The digest prints this so a
 # figure is never silently passed off as something it is not -- at 11:11 IST a TRI value is
 # necessarily yesterday's close, while a Nifty 50 spot level is live.
@@ -64,6 +66,21 @@ class Change:
 
 
 @dataclass
+class FxRate:
+    """USD/INR, shown on the instruments whose return is partly a currency move.
+
+    The Russell sleeve is a rupee-denominated wrapper around a dollar index, and both metals are
+    an international price translated at the day's rate. Over the year to 9 Sep 2026 the rupee
+    moved 7.5%, which is a large share of what those blocks report as performance and none of it
+    is the asset doing anything.
+    """
+
+    rate: float
+    as_of: dt.date
+    pct_1y: Optional[float] = None
+
+
+@dataclass
 class Snapshot:
     """Everything the digest knows about one instrument this morning."""
 
@@ -89,6 +106,12 @@ class Snapshot:
     # fall on a day the price rose 0.47%.
     level_day: Optional[Change] = None
     pe_then: dict[str, Reading] = field(default_factory=dict)
+    # Where today's readings sit inside their own trailing year. Both are None whenever the
+    # history is too short or too flat to answer honestly -- see stats.range_position.
+    pe_position: Optional[RangePosition] = None      # PE against its own 1Y distribution
+    lead_position: Optional[RangePosition] = None    # the headline number against its 1Y range
+    lead_range: str = "distance"                     # see InstrumentSpec.lead_range
+    fx: Optional[FxRate] = None
     # Human-facing caveats ("TRI publishes after close") and machine failures, kept apart so
     # expected limitations are not presented to the user as errors.
     notes: list[str] = field(default_factory=list)
@@ -98,6 +121,23 @@ class Snapshot:
     def healthy(self) -> bool:
         """Did we get anything worth printing?"""
         return self.level.known or self.tri.known or self.nav.known
+
+    @property
+    def lead(self) -> tuple[Reading, str]:
+        """The number that heads the block, and which field it came from.
+
+        Single-sourced because compute and format both need it and must not disagree: the 52-week
+        range has to be measured on the same series the headline prints, or the block would say
+        "0.1% off its 52-week high" about a number that is not the one above it.
+
+        For a tradeable ETF the market price leads; for an index the level leads; for a fund with
+        no listed price the NAV does.
+        """
+        if self.level.known:
+            return self.level, "level"
+        if self.tri.known:
+            return self.tri, "tri"
+        return self.nav, "nav"
 
     def note(self, text: str) -> None:
         if text not in self.notes:

@@ -21,18 +21,27 @@ move over 1/2/3/4 weeks and 3/6/12 months — each with the PE **as it stood on 
 Then a filtered news and policy section.
 
 <p align="center">
-  <img src="docs/sample-digest.png" alt="Sample morning digest showing Nifty Smallcap 250 TRI, the Nippon Gold ETF and the gold:silver ratio" width="640">
+  <img src="docs/sample-digest.png" alt="Sample morning digest showing Nifty Smallcap 250 TRI, the Zerodha Silver ETF and the gold:silver ratio" width="640">
 </p>
 
 <p align="center">
-  <sub>Three of the nine blocks, rendered from real output. The rupee sign and flag emoji are
-  substituted in this image only — the Telegram message shows them correctly.</sub>
+  <sub>Three of the nine blocks, rendered from real output by
+  <a href="scripts/render_sample.py"><code>scripts/render_sample.py</code></a>. The rupee sign and
+  flag emoji are substituted in this image only — the Telegram message shows them correctly.</sub>
 </p>
 
 Every figure above came out of the live sources; nothing here is illustrative. Note what the
-labels are doing: `prev close · 17 Aug` because TRI and PE publish only after the close, and
-`moves on TRI (total return)` because that is the series the percentages were computed on. The
-gold block carries no PE column at all, since gold has no earnings.
+labels are doing:
+
+* `prev close · 08 Sep` because TRI and PE publish only after the close.
+* `moves on TRI (total return)` because that is the series the percentages were computed on —
+  and for silver, `moves on NAV, to 07 Sep close`, because Zerodha files its commodity NAVs to
+  AMFI a day behind the exchange.
+* Which is why the silver headline reads `+0.47%` above a column of negatives. Those are two
+  different series on two different sessions, so the price shows *its own* day move and the
+  next line says so outright. The alternative — printing the NAV's move beside the price — is
+  what this bot did until 9 Sep 2026, and it was wrong about the direction.
+* Neither metal block carries a PE column, since metal has no earnings.
 
 ---
 
@@ -401,10 +410,18 @@ python -m venv .venv
 .venv/Scripts/python -m scripts.smoke               # fetch everything, print the digest
 .venv/Scripts/python -m scripts.diagnose            # reachability table for every source
 .venv/Scripts/python -m scripts.news_check          # probe feeds, show what scoring picks
-.venv/Scripts/python -m unittest discover -s tests  # 67 tests, no network
+.venv/Scripts/python -m unittest discover -s tests  # 112 tests, no network
+.venv/Scripts/python scripts/render_sample.py       # regenerate the README screenshot
 ```
 
 Useful flags: `--only <key>` to restrict instruments, `--no-news`, `--verbose`.
+
+If AMFI, IBJA and SEBI all fail locally with `CERTIFICATE_VERIFY_FAILED` while everything else
+works, the venv's `certifi` is stale — those three sit behind Sectigo's Root R46, which older
+bundles do not carry. `requirements.txt` pins `certifi>=2026.7.22` for this reason, but an
+environment created before that pin keeps whatever it was built with. `pip install -U certifi`
+fixes it. Never reach for `verify=False`: it would make an interception indistinguishable from a
+working day, on a bot whose entire job is reporting numbers accurately.
 
 `scripts/news_check.py` is the one to run after touching feeds or scoring rules — a dead RSS URL
 is a silent failure, and it makes both the dead feeds and the ruleset's choices visible.
@@ -442,6 +459,11 @@ bot/
     gsr.py         gold:silver ratio
     yahoo.py       small chart client, used only where exchanges publish nothing
 data/history/      committed daily; the cache that makes lookbacks cheap
+scripts/
+  diagnose.py      per-source reachability table, also runnable on the runner
+  news_check.py    probe the RSS list and show what the scoring picks
+  smoke.py         fetch everything and print the digest
+  render_sample.py regenerate the README screenshot from real output
 ```
 
 Two invariants hold the correctness together:
@@ -456,6 +478,13 @@ date is printed in every block.
 **Upstream formats are parsed by name, never by position.** Column order is not a contract, and
 when AMFI changed theirs the cost was three weeks of frozen numbers. A response whose shape is no
 longer recognised is refused, not guessed at.
+
+**A percentage belongs to one series over one interval, and says which.** The headline number is
+the price, so the arrow beside it is the price's own move against the price's own previous close
+— never the table's, which may be a fund NAV from a different session. And "previous close" is
+bounded to five days: if the price series has a hole, the block shows no day move rather than a
+two-week move wearing a `1D` label. Both halves of that shipped broken at some point, in each
+case producing a number that was plausible, prominent and wrong.
 
 ---
 

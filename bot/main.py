@@ -13,13 +13,15 @@ ends in *something* being delivered:
   rendering or sending dies -> a failure notice is attempted, and the digest is printed to
                                stdout so it survives in the Actions log
 
-Exit codes: 0 healthy, 1 delivered but degraded, 2 nothing delivered.
+Exit codes: 0 delivered (degradation is reported inside the message and as a workflow
+annotation, not as a failed job), 2 nothing delivered. 1 is used only by --dry-run.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -32,7 +34,7 @@ from .feeds import FEEDS
 from .http import Http
 from .instruments import build_registry
 from .ledger import NewsLedger, SendLedger
-from .model import Digest
+from .model import FRESHNESS_STALE, Digest
 from .notify import active_notifiers, broadcast
 from .state import Store
 from .util import ist_now
@@ -46,6 +48,20 @@ STATE_DIR = ROOT / "data" / "state"
 EXIT_OK = 0
 EXIT_DEGRADED = 1
 EXIT_FAILED = 2
+
+
+def annotate(level: str, title: str, message: str) -> None:
+    """Surface something in the GitHub Actions run summary without failing the job.
+
+    A degraded run used to exit non-zero, which turned the run red AND triggered the workflow's
+    failure alert -- an alert whose text says "no digest was produced", which was a lie whenever
+    the digest had in fact been delivered with one source missing. Crying wolf trains you to
+    ignore the alert that matters, so degradation is now an annotation and only an undelivered
+    digest is a failure.
+    """
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        flat = message.replace("\n", " ")
+        print(f"::{level} title={title}::{flat}", flush=True)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -135,11 +151,37 @@ def build_digest(args: argparse.Namespace) -> tuple[Digest, list[str], Optional[
     if unhealthy:
         digest.warnings.append(f"{len(unhealthy)} instrument(s) unavailable")
 
+    # An instrument whose source has quietly stopped updating stays "healthy" -- it still has a
+    # cached value to print -- so it never reaches the warning above. That is exactly how the
+    # AMFI column change froze two funds' NAV for three weeks in Aug 2026 while every run went
+    # green. compute.build_snapshot already marks a reading stale once its basis is more than
+    # STALE_AFTER_DAYS behind; this lifts that from a dim per-instrument note into the header,
+    # where it is the first thing read.
+    stale = [
+        snapshot.display
+        for snapshot in digest.snapshots
+        if any(
+            getattr(snapshot, name).known and getattr(snapshot, name).freshness == FRESHNESS_STALE
+            for name in ("level", "tri", "nav")
+        )
+    ]
+    if stale:
+        digest.warnings.append(f"not updating: {', '.join(stale)}")
+
     return digest, unhealthy, news_ledger
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+
+    # A Windows console defaults to cp1252, which cannot encode the arrows, the rupee sign or
+    # the flag in the digest -- so --dry-run used to do all the work and then die in print().
+    # The runner is UTF-8 already, so this only matters when testing locally; but a debugging
+    # aid that crashes at the last line is worse than no debugging aid.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)-7s %(name)s: %(message)s",
@@ -211,8 +253,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if everything_failed:
         return EXIT_FAILED
+
     log.info("digest delivered (%s chars)", len(text))
-    return EXIT_DEGRADED if unhealthy else EXIT_OK
+    if unhealthy:
+        # `unhealthy` holds instrument keys; the errors live on the matching snapshots.
+        broken = {s.key: s for s in digest.snapshots}
+        detail = "; ".join(
+            f"{broken[k].display}: {'; '.join(broken[k].errors) or 'no data'}"
+            for k in unhealthy if k in broken
+        )
+        log.warning("delivered with %s instrument(s) degraded: %s", len(unhealthy), detail)
+        annotate("warning", f"{len(unhealthy)} instrument(s) degraded", detail)
+    # Delivered is delivered. The reader can see the gaps in the message itself, so the job is
+    # green and the failure alert stays reserved for a morning with no digest at all.
+    return EXIT_OK
 
 
 if __name__ == "__main__":

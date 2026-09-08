@@ -205,8 +205,11 @@ def render(digest: Digest) -> str:
         "\U0001f1ee\U0001f1f3 <b>Morning Market Digest</b>",
         f"<i>{when:%a %d %b %Y} · {when:%H:%M} IST</i>",
     ]
-    if digest.warnings:
-        head.append(f"<i>⚠ {esc(digest.warnings[0])}</i>")
+    # Every warning, not just the first. A source that has quietly stopped updating and a feed
+    # outage are different problems, and showing only one of them hides the other -- which is
+    # how a three-week NAV freeze went unnoticed in Aug 2026.
+    for warning in digest.warnings:
+        head.append(f"<i>⚠ {esc(warning)}</i>")
 
     body = [render_snapshot(s, when) for s in digest.snapshots]
     tail = [render_news(digest.news)]

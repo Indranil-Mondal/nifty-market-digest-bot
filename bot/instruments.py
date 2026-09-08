@@ -19,7 +19,7 @@ from typing import Callable
 
 from .compute import FetchResult, InstrumentSpec
 from .http import Http
-from .sources import bse, gold, gsr, nse, russell_tech
+from .sources import bse, gold, gsr, nse, russell_tech, silver
 from .state import Series
 
 Fetcher = Callable[[Http, Series, InstrumentSpec, dt.date], FetchResult]
@@ -115,6 +115,21 @@ def build_registry() -> list[Registration]:
                 ),
             ),
             gold.fetch,
+        ),
+        Registration(
+            InstrumentSpec(
+                key="silver_zerodha",
+                display="SILVER — ZERODHA SILVER ETF",
+                kind="etf",
+                basis="nav",
+                basis_label="NAV",
+                # Silver has no earnings either. Same absence as gold, same dash.
+                has_pe=False,
+                notes=(
+                    "physically backed; one unit is about a tenth of a gram of silver",
+                ),
+            ),
+            silver.fetch,
         ),
         Registration(
             InstrumentSpec(

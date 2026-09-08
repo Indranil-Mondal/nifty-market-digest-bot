@@ -19,15 +19,27 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bot.http import Http                                   # noqa: E402
-from bot.sources import bse, gold, gsr, nse, russell_tech    # noqa: E402
-from bot.sources.amfi import HISTORY_URL                     # noqa: E402
-from bot.util import fmt_ddmmmyyyy, ist_today                # noqa: E402
+from bot.http import Http                                            # noqa: E402
+from bot.sources import amfi, bse, bse_etf, gold, gsr, nse           # noqa: E402
+from bot.sources import russell_tech, silver                         # noqa: E402
+from bot.sources.amfi import HISTORY_URL                             # noqa: E402
+from bot.util import fmt_ddmmmyyyy, ist_today                        # noqa: E402
+
+# How far behind a published NAV may fall before the source counts as broken rather than slow.
+# An India-domiciled ETF publishes daily, so a week's silence is a fault. The overseas feeder
+# fund legitimately lags both calendars, so it gets longer before we call it.
+NAV_STALE_DAYS = 7
+NAV_STALE_DAYS_OVERSEAS = 12
 
 CRITICAL, OPTIONAL = "CRITICAL", "optional"
 
 
 def main() -> int:
+    # Windows consoles default to cp1252 and mangle the em dashes in these labels.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     http = Http(retries=2)
     today = ist_today()
     recent = today - dt.timedelta(days=1)
@@ -73,40 +85,75 @@ def main() -> int:
     check("bseindices PR/TR", CRITICAL, "www.bseindices.com", bse_prtr)
     check("BSE AllIndices CSV", CRITICAL, "www.bseindia.com", bse_valuation)
 
-    # --- gold -------------------------------------------------------------------------
-    def bhavcopy():
-        when, fields = gold._bhavcopy_close(http, recent)
-        return bool(fields), f"{when} close={fields.get('level')}" if fields else "no row"
-
-    def bse_quote():
-        quote = gold._quote(http)
-        if quote is None:
-            return False, "blocked or wrong instrument"
-        return quote.price is not None, f"ltp={quote.price} iNAV={quote.inav} ason={quote.price_date}"
-
-    def nse_etf():
-        price = gold._nse_price(http)
-        return price is not None, f"ltP={price}"
-
-    def amfi_gold():
-        value, when = __import__("bot.sources.amfi", fromlist=["newest_nav"]).newest_nav(
-            http, gold.GOLD_BEES, today
+    # --- AMFI report shape --------------------------------------------------------------
+    # The canary for the failure that actually happened. In Aug 2026 AMFI reordered this
+    # report's columns; both layouts are eight fields wide, so nothing but the header names
+    # distinguishes them, and every fund NAV in the digest froze for three weeks. Asserting the
+    # header still resolves turns the next such change into a red line here instead of numbers
+    # that quietly stop moving.
+    def amfi_layout():
+        lines = http.stream_lines(
+            HISTORY_URL,
+            params={"mf": "21", "tp": "1", "frmdt": fmt_ddmmmyyyy(recent), "todt": fmt_ddmmmyyyy(today)},
+            keep="140088;",
+            timeout=120,
         )
-        return value is not None, f"{when} nav={value}"
+        if not lines:
+            return False, "no response"
+        for candidate in lines[:3]:
+            columns = amfi.resolve_columns(candidate)
+            if columns is not None:
+                return True, f"isin@{columns.isin_growth} nav@{columns.nav} date@{columns.date}"
+        return False, f"header not recognised: {lines[0][:80]!r}"
 
-    def amfi_russell():
-        value, when = __import__("bot.sources.amfi", fromlist=["newest_nav"]).newest_nav(
-            http, russell_tech.EDELWEISS_US_TECH, today
-        )
-        return value is not None, f"{when} nav={value}"
+    check("AMFI report column layout", CRITICAL, "portal.amfiindia.com", amfi_layout)
 
-    check("BSE bhavcopy CSV", CRITICAL, "www.bseindia.com", bhavcopy)
+    # --- listed commodity ETFs (gold, silver) --------------------------------------------
+    def bhavcopy_for(etf):
+        def run():
+            when, fields = bse_etf.bhavcopy_close(http, etf.isin, recent)
+            return bool(fields), f"{when} close={fields.get('level')}" if fields else "no row"
+        return run
+
+    def quote_for(etf):
+        def run():
+            quote = bse_etf.quote(http, etf)
+            if quote is None:
+                return False, "blocked or wrong instrument"
+            return quote.price is not None, (
+                f"ltp={quote.price} iNAV={quote.inav} ason={quote.price_date}"
+            )
+        return run
+
+    def nse_etf_for(etf):
+        def run():
+            price = bse_etf.nse_price(http, etf.nse_symbol)
+            return price is not None, f"ltP={price}"
+        return run
+
+    def nav_for(scheme, limit):
+        def run():
+            value, when = amfi.newest_nav(http, scheme, today)
+            if value is None or when is None:
+                return False, "no NAV rows"
+            behind = (today - when).days
+            # Reachable but frozen is the failure mode this bot has actually suffered, so
+            # "we got a number" is not the test -- "we got a recent number" is.
+            return behind <= limit, f"{when} nav={value} ({behind}d behind)"
+        return run
+
+    check("BSE bhavcopy CSV", CRITICAL, "www.bseindia.com", bhavcopy_for(gold.ETF))
     # This is THE open question: it is the only iNAV route that exists, and it is Akamai-fronted
     # behind a UA+Referer gate, so its behaviour from a datacenter IP cannot be predicted.
-    check("BSE quote (iNAV source)", OPTIONAL, "api.bseindia.com", bse_quote)
-    check("NSE ETF list (price only)", OPTIONAL, "www.nseindia.com", nse_etf)
-    check("AMFI NAV — Gold BeES", CRITICAL, "portal.amfiindia.com", amfi_gold)
-    check("AMFI NAV — Edelweiss FoF", CRITICAL, "portal.amfiindia.com", amfi_russell)
+    check("BSE quote — GOLDBEES (iNAV)", OPTIONAL, "api.bseindia.com", quote_for(gold.ETF))
+    check("BSE quote — SILVERCASE (iNAV)", OPTIONAL, "api.bseindia.com", quote_for(silver.ETF))
+    check("NSE ETF list (price only)", OPTIONAL, "www.nseindia.com", nse_etf_for(gold.ETF))
+    check("AMFI NAV — Gold BeES", CRITICAL, "portal.amfiindia.com",
+          nav_for(gold.GOLD_BEES, NAV_STALE_DAYS))
+    check("AMFI NAV — Zerodha Silver ETF", CRITICAL, "portal.amfiindia.com",
+          nav_for(silver.ZERODHA_SILVER, NAV_STALE_DAYS))
+    check("AMFI NAV — Edelweiss FoF", CRITICAL, "portal.amfiindia.com",
+          nav_for(russell_tech.EDELWEISS_US_TECH, NAV_STALE_DAYS_OVERSEAS))
 
     # --- gold:silver ratio ------------------------------------------------------------
     def metals():

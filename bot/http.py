@@ -185,8 +185,14 @@ class Http:
                                 continue
                             seen += len(raw) + 1
                             if seen > max_bytes:
-                                log.warning("STREAM %s exceeded %s bytes; truncating", url, max_bytes)
-                                break
+                                # Fail closed. Returning what arrived so far would hand the
+                                # caller a silently incomplete series -- indistinguishable from
+                                # a source that simply stopped publishing.
+                                log.error(
+                                    "STREAM %s exceeded %s bytes; refusing a partial response",
+                                    url, max_bytes,
+                                )
+                                return None
                             line = raw.decode("utf-8", errors="replace").strip()
                             if index < 3 or keep is None or line.startswith(keep):
                                 kept.append(line)

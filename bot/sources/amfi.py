@@ -183,6 +183,7 @@ def nav_history(
 
         found = 0
         mismatched = 0
+        unparsed = 0
         for line in lines:
             parts = line.split(";")
             if len(parts) < columns.width:
@@ -199,6 +200,11 @@ def nav_history(
             nav = parse_float(parts[columns.nav])
             when = parse_ddmmmyyyy(parts[columns.date])
             if nav is None or when is None:
+                # The row is provably ours -- right scheme code, right ISIN -- so a value that
+                # will not parse is a format change one level below the header, not a row to
+                # skip quietly. Dropping these silently is the same mistake that started all
+                # this, just deeper down.
+                unparsed += 1
                 continue
             out[when] = {field: nav}
             found += 1
@@ -216,7 +222,18 @@ def nav_history(
                 "AMFI: %s row(s) for %s did not carry ISIN %s in %s",
                 mismatched, scheme.scheme_code, scheme.isin, window_label,
             )
-        if found == 0 and not mismatched:
+        if unparsed:
+            if found == 0:
+                errors.append(
+                    f"AMFI: {unparsed} row(s) for scheme {scheme.scheme_code} carried the right "
+                    f"ISIN but no parseable NAV or date ({window_label})"
+                )
+            else:
+                log.warning(
+                    "AMFI: %s of %s rows for %s had an unparseable NAV or date in %s",
+                    unparsed, unparsed + found, scheme.scheme_code, window_label,
+                )
+        if found == 0 and not mismatched and not unparsed:
             # A window with genuinely no NAV rows is normal for a short holiday span, so only
             # complain when the whole requested range came back empty.
             log.debug("AMFI: no rows for %s in %s", scheme.scheme_code, window_label)

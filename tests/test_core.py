@@ -712,6 +712,31 @@ class TestStore(unittest.TestCase):
             self.assertIn("x: 1 points", "\n".join(store.summary()))
 
 
+class TestRateLimitBudget(unittest.TestCase):
+    """On 21 Aug 2026 a sustained Telegram 429 cost a whole morning's digest, so the shape of
+    this budget is load-bearing: it must span the whole digest, not reset per message."""
+
+    def test_budget_spans_every_chunk_of_one_digest(self):
+        # A per-message budget would silently be worth double, because the digest always splits
+        # into two chunks -- and could then outlast the job holding it.
+        budget = notify.RateLimitBudget(30.0)
+        self.assertTrue(budget.take(20.0))      # chunk 1 waits
+        self.assertFalse(budget.take(20.0))     # chunk 2 must not get a fresh 20s
+        self.assertEqual(budget.spent, 20.0)
+
+    def test_budget_allows_waits_up_to_the_limit(self):
+        budget = notify.RateLimitBudget(30.0)
+        self.assertTrue(budget.take(30.0))
+        self.assertEqual(budget.remaining, 0.0)
+        self.assertFalse(budget.take(0.1))
+
+    def test_default_budget_fits_inside_the_job(self):
+        # The job allows a 180-minute wait plus the work; the 429 budget must be a rounding
+        # error against that, not a second timeout.
+        self.assertLessEqual(notify.RATE_LIMIT_PATIENCE, 600.0)
+        self.assertGreaterEqual(notify.RATE_LIMIT_PATIENCE, 120.0)
+
+
 class TestAmfiLayout(unittest.TestCase):
     """AMFI reordered this report's columns on 19 Aug 2026, which froze every fund NAV in the
     digest for three weeks. Both layouts are eight fields wide and both start with the scheme

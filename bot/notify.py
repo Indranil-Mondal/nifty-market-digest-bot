@@ -41,8 +41,29 @@ INTER_CHUNK_PAUSE = 2.0
 # Because a 429 consumed one of the four ordinary attempts and skipped the exponential backoff,
 # the bot gave up after 32 seconds per chunk, and three consecutive scheduled runs lost the
 # digest. Waiting several minutes instead costs nothing and is exactly what the API asked for.
-RATE_LIMIT_PATIENCE = 480.0     # cumulative seconds we are willing to spend waiting out a 429
+#
+# The budget is per DIGEST, not per message. The digest always splits into two chunks, so a
+# per-message budget would quietly be worth double what it says and could outlast the job.
+RATE_LIMIT_PATIENCE = 300.0     # cumulative seconds spent waiting out 429s, across all chunks
 RATE_LIMIT_MAX_SLEEP = 60.0     # never sleep longer than this in a single wait
+
+
+class RateLimitBudget:
+    """How much longer we are willing to wait out Telegram's flood control, for one digest."""
+
+    __slots__ = ("remaining", "spent")
+
+    def __init__(self, seconds: float = RATE_LIMIT_PATIENCE) -> None:
+        self.remaining = seconds
+        self.spent = 0.0
+
+    def take(self, wait: float) -> bool:
+        """Claim `wait` seconds. False means the budget is exhausted; stop retrying."""
+        if wait > self.remaining:
+            return False
+        self.remaining -= wait
+        self.spent += wait
+        return True
 
 
 def esc(text: object) -> str:
@@ -125,10 +146,10 @@ class TelegramNotifier(Notifier):
         except (TypeError, ValueError):
             return fallback
 
-    def _post(self, payload: dict) -> bool:
+    def _post(self, payload: dict, budget: Optional[RateLimitBudget] = None) -> bool:
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+        budget = budget if budget is not None else RateLimitBudget()
         delay = 2.0
-        rate_limited_for = 0.0
         failures = 0
 
         while failures < self.retries:
@@ -147,17 +168,16 @@ class TelegramNotifier(Notifier):
 
             if resp.status_code == 429:
                 wait = min(self._retry_after(resp, delay), RATE_LIMIT_MAX_SLEEP)
-                if rate_limited_for + wait > RATE_LIMIT_PATIENCE:
+                if not budget.take(wait):
                     log.error(
-                        "telegram has been rate limiting for %.0fs; stopping so a later run can "
-                        "retry rather than deepening the flood wait",
-                        rate_limited_for,
+                        "telegram has been rate limiting for %.0fs; stopping so a later attempt "
+                        "can retry rather than deepening the flood wait",
+                        budget.spent,
                     )
                     return False
-                rate_limited_for += wait
                 log.warning(
                     "telegram rate limited, waiting %.0fs (%.0fs of %.0fs patience used)",
-                    wait, rate_limited_for, RATE_LIMIT_PATIENCE,
+                    wait, budget.spent, RATE_LIMIT_PATIENCE,
                 )
                 time.sleep(wait)
                 continue        # deliberately does NOT consume an error attempt
@@ -182,6 +202,9 @@ class TelegramNotifier(Notifier):
     def send(self, text: str, *, silent: bool = False) -> bool:
         chunks = split_message(text)
         total = len(chunks)
+        # One budget for the whole digest. Per-message it would be worth `total` times what it
+        # says, and could outlast the job that is holding it.
+        budget = RateLimitBudget()
         for i, chunk in enumerate(chunks, start=1):
             body = chunk if total == 1 else f"{chunk}\n\n<i>({i}/{total})</i>"
             payload = {
@@ -191,7 +214,7 @@ class TelegramNotifier(Notifier):
                 "disable_web_page_preview": True,
                 "disable_notification": silent,
             }
-            if not self._post(payload):
+            if not self._post(payload, budget):
                 # Stop at the first failure instead of pushing the remaining chunks at a chat
                 # that is already refusing us -- continuing only deepens a flood wait, which is
                 # what turned one bad chunk into a lost digest on 21 Aug 2026.

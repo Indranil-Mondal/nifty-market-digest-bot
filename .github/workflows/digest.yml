@@ -1,45 +1,67 @@
 name: Morning digest
 
 # ---------------------------------------------------------------------------------------------
-# TIMING — and the reason there are four schedules rather than one
+# TIMING — why this looks stranger than a single cron line
 #
-# GitHub Actions cron is always UTC and knows nothing about time zones. India is UTC+05:30 with
-# no daylight saving, so 11:11 IST is 05:41 UTC.
+# The digest is meant to arrive at 11:11 IST, which is 05:41 UTC. Actions cron is UTC-only, so
+# the naive answer is one "41 5" line. That does not work, and the reason is worth writing down
+# because it is invisible until you measure it.
 #
-# The problem: Actions cron drift in 2026 is severe and GitHub has acknowledged it publicly,
-# attributing it to scheduled-workflow load growing faster than capacity. Maintainers report
-# nightly jobs arriving one to four hours late, and a */15 workflow firing roughly every 90
-# minutes. The delay happens BEFORE the run is created, so no amount of configuration avoids it.
-# A single 05:41 UTC trigger therefore cannot promise delivery "by 11:11 IST".
+# GitHub creates scheduled runs LATE. Not by seconds — measured on this repository between
+# 18 Aug and 8 Sep 2026, comparing each run's created_at against its nominal cron time:
 #
-# The defence: fire several attempts across the morning and let the FIRST one that actually runs
-# send the digest. `--once-per-day` makes that safe — later attempts see the send ledger, log
-# "already delivered" and exit without messaging you again. Attempts are all after the 09:15 IST
-# market open (03:45 UTC) so every one of them has live intraday levels:
+#     18–26 Aug   +25 to +45 min
+#     27 Aug      +11h 01m
+#     28 Aug      +12h 12m
+#     31 Aug      +6h 36m
+#      1 Sep      +5h 11m
+#      2–8 Sep    +4h 17m to +5h 03m, every single day
 #
-#     04:11 UTC = 09:41 IST   early attempt
-#     04:51 UTC = 10:21 IST
-#     05:31 UTC = 11:01 IST   the intended slot, closest to 11:11 without overrunning it
-#     06:31 UTC = 12:01 IST   catch-up, so a badly delayed morning still delivers
+# The delay is in run CREATION, so nothing in this file can prevent it, and it applies to every
+# cron entry on a given day at once — which is why the previous design (four crons, first one
+# wins) failed: all four drifted together and the digest arrived at 14:20 IST.
 #
-# Minutes ending in :00 are the most congested, so none are used. If you want delivery as close
-# to 11:11 as possible and are willing to accept occasional lateness, delete the first two lines.
-# For minute-accurate delivery, drive `workflow_dispatch` from an external free scheduler
-# instead — see README "Timing".
+# THE FIX: stop trying to be triggered at the right time, and instead be AWAKE at the right time.
+# Attempts are spread from mid-afternoon UTC the previous day through to just before the target.
+# Whichever attempt first lands inside the three-and-a-half hours before 05:41 UTC simply waits
+# for the target and then sends. Delivery lands at 11:11 IST to the minute, whatever GitHub's
+# queue is doing that day. Every other attempt sees it is too early (or that the digest already
+# went out) and exits in a few seconds.
 #
-# Weekdays only. Indian equity markets are shut at weekends, so a weekend run would re-send
-# Friday's numbers as if they were new. For all seven days, change `1-5` to `*`.
+# Three consequences, stated honestly:
+#   * One runner per day idles for up to ~3.5h. On a public repository Actions minutes are not
+#     metered, so this costs nothing, but it is real machine time and worth knowing about.
+#   * The Actions tab shows ~10 runs a day. All but one finish in seconds.
+#   * If GitHub's delay ever exceeds ~15h, no attempt lands in the window; the first one to
+#     arrive after the target then sends late rather than not at all (LATE_GRACE_MIN below).
 #
-# Exchange holidays are deliberately not encoded: a hardcoded holiday list rots. On a holiday the
-# digest still sends and reports the previous close, labelled with its real date.
+# If you would rather have exact timing with no idling, drive workflow_dispatch from an external
+# free scheduler — dispatch runs start within seconds. That costs an account and a stored token
+# to keep alive, which is why it is not the default here. See README "Timing".
+#
+# Weekday selection is deliberately NOT in the cron lines. Attempts start the previous UTC
+# afternoon, so a Friday-evening attempt is aimed at Monday; the gate below works out the next
+# weekday target itself. 11:11 IST and 05:41 UTC always fall on the same calendar day, so an
+# IST weekday and a UTC weekday are the same thing here.
+#
+# Exchange holidays are still not encoded: a hardcoded holiday list rots. On a holiday the digest
+# sends and reports the previous close, labelled with its real date.
 # ---------------------------------------------------------------------------------------------
 
 on:
   schedule:
-    - cron: "11 4 * * 1-5"
-    - cron: "51 4 * * 1-5"
-    - cron: "31 5 * * 1-5"
-    - cron: "31 6 * * 1-5"
+    # Spread wide enough to absorb ~15h of queue delay, and denser near the target so that a
+    # normal (sub-hour) delay is caught close to 05:41 rather than idling all night.
+    - cron: "41 14 * * *"
+    - cron: "41 17 * * *"
+    - cron: "41 20 * * *"
+    - cron: "41 22 * * *"
+    - cron: "41 0 * * *"
+    - cron: "41 2 * * *"
+    - cron: "41 3 * * *"
+    - cron: "41 4 * * *"
+    - cron: "11 5 * * *"
+    - cron: "31 5 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -55,9 +77,9 @@ on:
 permissions:
   contents: write
 
-# With four scheduled attempts a delayed run can still be going when the next fires. Serialise
-# them so they cannot send two digests or race on the history commit; the second then reads the
-# ledger the first wrote and exits cleanly.
+# One attempt may still be waiting for the delivery slot when the next fires. Serialise them so
+# they cannot send two digests or race on the history commit; the later one then reads the ledger
+# the first wrote and exits cleanly.
 concurrency:
   group: morning-digest
   cancel-in-progress: false
@@ -65,11 +87,82 @@ concurrency:
 jobs:
   digest:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Long enough for the maximum wait plus the work. The platform maximum for a job is 6 hours.
+    timeout-minutes: 270
 
     steps:
+      # This runs BEFORE checkout on purpose. An attempt that is simply too early should cost a
+      # runner start and nothing else — no clone, no Python, no pip.
+      - name: Decide whether this attempt should deliver
+        id: gate
+        run: |
+          set -euo pipefail
+
+          TARGET_UTC="05:41"      # 11:11 IST
+          MAX_WAIT_MIN=210        # how long we are willing to stay awake waiting for the slot
+          LATE_GRACE_MIN=480      # how late is still worth sending (8h => 19:11 IST)
+
+          now=$(date -u +%s)
+          today=$(date -u +%F)
+          proceed=false
+          sleep_for=0
+          reason=""
+
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            proceed=true
+            reason="manual ${{ github.event_name }} — running immediately"
+          else
+            dow=$(date -u -d "${today}T00:00:00Z" +%u)                 # 1=Mon .. 7=Sun
+            todays_target=$(date -u -d "${today}T${TARGET_UTC}:00Z" +%s)
+
+            # The next delivery slot that falls on a weekday, at or after now.
+            next_target=""
+            for i in 0 1 2 3 4; do
+              day=$(date -u -d "${today}T00:00:00Z +${i} day" +%F)
+              day_dow=$(date -u -d "${day}T00:00:00Z" +%u)
+              slot=$(date -u -d "${day}T${TARGET_UTC}:00Z" +%s)
+              if [ "$day_dow" -le 5 ] && [ "$slot" -ge "$now" ]; then
+                next_target=$slot
+                break
+              fi
+            done
+
+            if [ "$dow" -le 5 ] && [ "$now" -gt "$todays_target" ]; then
+              late_min=$(( (now - todays_target) / 60 ))
+              if [ "$late_min" -le "$LATE_GRACE_MIN" ]; then
+                proceed=true
+                reason="slot passed ${late_min} min ago — sending late rather than not at all"
+              else
+                reason="slot passed ${late_min} min ago, past the ${LATE_GRACE_MIN} min grace — skipping"
+              fi
+            elif [ -n "$next_target" ]; then
+              wait_min=$(( (next_target - now) / 60 ))
+              if [ "$wait_min" -le "$MAX_WAIT_MIN" ]; then
+                proceed=true
+                sleep_for=$(( next_target - now ))
+                reason="holding ${wait_min} min to deliver at ${TARGET_UTC} UTC / 11:11 IST"
+              else
+                reason="next slot is ${wait_min} min away — leaving it to a later attempt"
+              fi
+            else
+              reason="no weekday slot within five days — deferring"
+            fi
+          fi
+
+          echo "proceed=${proceed}"       >> "$GITHUB_OUTPUT"
+          echo "sleep_seconds=${sleep_for}" >> "$GITHUB_OUTPUT"
+          echo "$reason"
+          echo "\`$(date -u +'%F %H:%M')Z\` — ${reason}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for the delivery slot
+        if: steps.gate.outputs.proceed == 'true' && steps.gate.outputs.sleep_seconds != '0'
+        run: |
+          echo "sleeping ${{ steps.gate.outputs.sleep_seconds }}s so the digest lands at 11:11 IST"
+          sleep "${{ steps.gate.outputs.sleep_seconds }}"
+
       - name: Check out
-        uses: actions/checkout@v4
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/checkout@v7
         with:
           # Check out AND push over SSH with the repository's deploy key, instead of the default
           # GITHUB_TOKEN.
@@ -86,25 +179,27 @@ jobs:
           ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
 
       - name: Install dependencies
+        if: steps.gate.outputs.proceed == 'true'
         run: pip install -r requirements.txt
 
       # Several of these hosts behave differently from an Azure datacenter IP than from a home
       # connection, and that cannot be tested locally. This step answers it directly. It runs
       # only on a manual dispatch with the box ticked.
       - name: Diagnose sources
-        if: inputs.diagnose
+        if: steps.gate.outputs.proceed == 'true' && inputs.diagnose
         run: python -m scripts.diagnose
 
       # --once-per-day only on the schedule. A manual dispatch is an explicit request, so it
       # sends even if the morning's digest already went out.
       - name: Send digest
-        if: ${{ !inputs.diagnose }}
+        if: ${{ steps.gate.outputs.proceed == 'true' && !inputs.diagnose }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -113,7 +208,7 @@ jobs:
           python -m bot.main $GUARD ${{ inputs.dry_run && '--dry-run' || '' }}
 
       - name: Commit updated history
-        # Skipped on a diagnose run, which fetches nothing worth keeping.
+        # Skipped on a deferred attempt (nothing was fetched) and on a diagnose run.
         #
         # Runs even when the digest was degraded: whatever data we did collect is worth keeping,
         # and every stored point is one fewer archive request tomorrow.
@@ -121,7 +216,7 @@ jobs:
         # This commit also doubles as repository activity. GitHub disables scheduled workflows
         # after 60 days of inactivity on a repo, and a daily commit keeps the clock reset --
         # see README "Staying alive" for the caveat about bot-authored commits.
-        if: always() && !inputs.diagnose
+        if: always() && steps.gate.outputs.proceed == 'true' && !inputs.diagnose
         run: |
           # Prove which transport is in use. If this ever reads https:// then the deploy key was
           # not picked up and the 60-day keepalive is silently not working.
@@ -143,6 +238,10 @@ jobs:
         # dependency or a syntax mistake, anything that goes through bot/ would fail too -- and
         # silence is the one outcome we cannot allow, because it is indistinguishable from a
         # quiet market.
+        #
+        # This fires only when the digest could not be DELIVERED. A run that delivered with one
+        # source missing exits 0 and raises a workflow annotation instead, because an alert that
+        # says "no digest was produced" must never appear on a morning when one was.
         if: failure()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
